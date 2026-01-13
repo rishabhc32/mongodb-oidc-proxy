@@ -11,6 +11,10 @@ export interface OIDCProxyConfig {
   // Proxy Configuration
   listenPort: number;
   listenHost?: string;
+
+  // Limits
+  maxConnections?: number;       // Max concurrent connections (default: 10000)
+  connectionTimeoutMs?: number;  // Idle connection timeout in ms (default: 30000 = 30s)
 }
 
 export interface OIDCAuthState {

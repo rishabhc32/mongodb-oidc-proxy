@@ -281,6 +281,14 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
     }
   });
 
+  proxy.on('connectionTimeout', (connId: number) => {
+    if (args.ndjson) {
+      console.log(JSON.stringify({ ev: 'connectionTimeout', connId }));
+    } else {
+      console.log(`[${connId}] Connection timed out`);
+    }
+  });
+
   await proxy.start();
 }
 

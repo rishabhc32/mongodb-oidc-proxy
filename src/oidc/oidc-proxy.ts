@@ -16,6 +16,9 @@ interface ConnectionState {
   buffer: Buffer[];
 }
 
+const DEFAULT_MAX_CONNECTIONS = 10000;
+const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
+
 export class OIDCProxy extends EventEmitter {
   private server: net.Server;
   private backendClient: MongoClient;
@@ -25,10 +28,14 @@ export class OIDCProxy extends EventEmitter {
   private connections: Map<number, ConnectionState> = new Map();
   private connectionIdCounter = 0;
   private conversationIdCounter = 0;
+  private maxConnections: number;
+  private connectionTimeoutMs: number;
 
   constructor(config: OIDCProxyConfig) {
     super();
     this.config = config;
+    this.maxConnections = config.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
     this.jwtValidator = new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
     this.messageBuilder = new MessageBuilder();
     this.backendClient = new MongoClient(config.connectionString);
@@ -67,6 +74,19 @@ export class OIDCProxy extends EventEmitter {
 
   private handleConnection(socket: net.Socket): void {
     const connId = ++this.connectionIdCounter;
+
+    // Reject if max connections exceeded
+    if (this.connections.size >= this.maxConnections) {
+      socket.destroy();
+      return;
+    }
+
+    // Set idle timeout
+    socket.setTimeout(this.connectionTimeoutMs, () => {
+      this.emit('connectionTimeout', connId);
+      socket.destroy();
+    });
+
     const parser = new WireProtocolParser();
 
     const connState: ConnectionState = {
@@ -97,13 +117,17 @@ export class OIDCProxy extends EventEmitter {
 
     socket.pipe(parser);
 
+    // Clean up on socket close
     socket.on('close', () => {
-      this.connections.delete(connId);
       this.emit('connectionClosed', connId);
+      this.connections.delete(connId);
+      parser.destroy();
     });
 
+    // On error, destroy socket (triggers close event for cleanup)
     socket.on('error', (err: Error) => {
       this.emit('connectionError', connId, err);
+      socket.destroy();
     });
   }
 
@@ -128,7 +152,7 @@ export class OIDCProxy extends EventEmitter {
     }
 
     if (saslCmd.type === 'saslContinue') {
-      await this.handleSaslContinue(connState, msg, saslCmd.payload);
+      await this.handleSaslContinue(connState, msg, saslCmd.payload, saslCmd.conversationId);
       return;
     }
 
@@ -233,8 +257,19 @@ export class OIDCProxy extends EventEmitter {
   private async handleSaslContinue(
     connState: ConnectionState,
     msg: FullMessage,
-    payload?: Uint8Array
+    payload?: Uint8Array,
+    conversationId?: number
   ): Promise<void> {
+    // Validate conversationId matches the one from saslStart
+    if (conversationId !== connState.authState.conversationId) {
+      const response = this.messageBuilder.buildAuthFailureResponse(
+        msg.header.requestID,
+        'Invalid conversationId'
+      );
+      connState.socket.write(response);
+      return;
+    }
+
     if (!payload || payload.length === 0) {
       const response = this.messageBuilder.buildAuthFailureResponse(
         msg.header.requestID,
