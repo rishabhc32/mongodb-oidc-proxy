@@ -10,10 +10,12 @@ export interface JWTValidationResult {
 export class JWTValidator {
   private jwks: ReturnType<typeof createRemoteJWKSet>;
   private issuer: string;
+  private clientId: string;
   private audience?: string;
 
-  constructor(issuer: string, jwksUri?: string, audience?: string) {
+  constructor(issuer: string, clientId: string, jwksUri?: string, audience?: string) {
     this.issuer = issuer;
+    this.clientId = clientId;
     this.audience = audience;
 
     // Default JWKS URI follows OpenID Connect Discovery spec
@@ -27,6 +29,15 @@ export class JWTValidator {
         issuer: this.issuer,
         audience: this.audience
       });
+
+      // Verify client_id
+      const tokenClientId = (payload as Record<string, unknown>).client_id;
+      if (!(typeof tokenClientId === 'string' && tokenClientId && tokenClientId === this.clientId)) {
+        return {
+          valid: false,
+          error: 'client_id mismatch'
+        };
+      }
 
       return {
         valid: true,

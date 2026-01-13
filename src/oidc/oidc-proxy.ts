@@ -29,7 +29,7 @@ export class OIDCProxy extends EventEmitter {
   constructor(config: OIDCProxyConfig) {
     super();
     this.config = config;
-    this.jwtValidator = new JWTValidator(config.issuer, config.jwksUri, config.audience);
+    this.jwtValidator = new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
     this.messageBuilder = new MessageBuilder();
     this.backendClient = new MongoClient(config.connectionString);
     this.server = net.createServer(socket => this.handleConnection(socket));
