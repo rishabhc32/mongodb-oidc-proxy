@@ -190,60 +190,31 @@ export class OIDCProxy extends EventEmitter {
 
   private async handleSaslStart(connState: ConnectionState, msg: FullMessage, payload?: Uint8Array): Promise<void> {
     connState.authState.conversationId = ++this.conversationIdCounter;
+    
+    // Try to authenticate with JWT from payload
+    const jwt = this.extractJwtFromPayload(connState.id, payload);
+    if (jwt) {
+      this.emit('debug', connState.id, 'saslStart has JWT, validating...');
+      const result = await this.jwtValidator.validate(jwt);
 
-    // Check if client sent JWT in saslStart payload (cached token from previous auth)
-    if (payload && payload.length > 0) {
-      this.emit('debug', connState.id, `saslStart payload size: ${payload.length} bytes`);
-      try {
-        const payloadDoc = deserialize(payload);
-        const payloadKeys = Object.keys(payloadDoc);
-        this.emit('debug', connState.id, `saslStart payload keys: ${payloadKeys.join(', ')}`);
-
-        const jwt = payloadDoc.jwt;
-        if (jwt) {
-          // Decode JWT payload for debugging (middle part between dots)
-          try {
-            const parts = jwt.split('.');
-            if (parts.length === 3) {
-              const payloadB64 = parts[1];
-              const payloadJson = Buffer.from(payloadB64, 'base64').toString('utf8');
-              this.emit('debug', connState.id, `JWT payload: ${payloadJson}`);
-            }
-          } catch { /* ignore decode errors */ }
-
-          this.emit('debug', connState.id, 'saslStart has JWT, validating...');
-          // Validate the JWT
-          const result = await this.jwtValidator.validate(jwt);
-          if (result.valid) {
-            // Authentication successful via saslStart
-            connState.authState.authenticated = true;
-            connState.authState.principalName = result.subject;
-            connState.authState.tokenExp = result.exp;
-
-            const response = this.messageBuilder.buildAuthSuccessResponse(
-              msg.header.requestID,
-              connState.authState.conversationId
-            );
-            connState.socket.write(response);
-            this.emit('authSuccess', connState.id, result.subject + ' (via saslStart)');
-            
-            return;
-          } else {
-            this.emit('debug', connState.id, `JWT validation failed: ${result.errorCode} - ${result.error}`);
-            if (result.errorCode === JWTValidationError.EXPIRED) {
-              this.sendReauthRequired(connState, msg.header.requestID, 'access token has expired');
-              return;
-            }
-            // Fall through to return IdP info - this forces driver to do fresh OIDC flow
-          }
-        } else {
-          this.emit('debug', connState.id, 'saslStart payload has no jwt field');
-        }
-      } catch (err) {
-        this.emit('debug', connState.id, `saslStart payload parse error: ${err}`);
+      if (result.valid) {
+        connState.authState.authenticated = true;
+        connState.authState.principalName = result.subject;
+        connState.authState.tokenExp = result.exp;
+        connState.socket.write(this.messageBuilder.buildAuthSuccessResponse(
+          msg.header.requestID,
+          connState.authState.conversationId
+        ));
+        this.emit('authSuccess', connState.id, result.subject + ' (via saslStart)');
+        return;
       }
-    } else {
-      this.emit('debug', connState.id, 'saslStart with empty payload');
+
+      this.emit('debug', connState.id, `JWT validation failed: ${result.errorCode} - ${result.error}`);
+
+      if (result.errorCode === JWTValidationError.EXPIRED) {
+        this.sendReauthRequired(connState, msg.header.requestID, 'access token has expired');
+        return;
+      }
     }
 
     // No JWT or validation failed - return IdP info for OIDC flow
@@ -251,15 +222,45 @@ export class OIDCProxy extends EventEmitter {
       issuer: this.config.issuer,
       clientId: this.config.clientId
     };
-
-    const response = this.messageBuilder.buildSaslStartResponse(
+    connState.socket.write(this.messageBuilder.buildSaslStartResponse(
       msg.header.requestID,
       connState.authState.conversationId,
       idpInfo
-    );
-
-    connState.socket.write(response);
+    ));
     this.emit('saslStart', connState.id, idpInfo);
+  }
+
+  private extractJwtFromPayload(connId: number, payload?: Uint8Array): string | null {
+    if (!payload || payload.length === 0) {
+      this.emit('debug', connId, 'saslStart with empty payload');
+      return null;
+    }
+
+    this.emit('debug', connId, `saslStart payload size: ${payload.length} bytes`);
+
+    let payloadDoc: Record<string, unknown>;
+    try {
+      payloadDoc = deserialize(payload);
+    } catch (err) {
+      this.emit('debug', connId, `saslStart payload parse error: ${err}`);
+      return null;
+    }
+
+    const jwt = payloadDoc.jwt as string | undefined;
+    if (!jwt) {
+      this.emit('debug', connId, 'saslStart payload has no jwt field');
+      return null;
+    }
+
+    // Log JWT payload for debugging
+    try {
+      const parts = jwt.split('.');
+      if (parts.length === 3) {
+        this.emit('debug', connId, `JWT payload: ${Buffer.from(parts[1], 'base64').toString('utf8')}`);
+      }
+    } catch { /* ignore */ }
+
+    return jwt;
   }
 
   private async handleSaslContinue(
@@ -364,7 +365,6 @@ export class OIDCProxy extends EventEmitter {
   }
 
   private sendReauthRequired(connState: ConnectionState, requestID: number, reason: string): void {
-    this.emit('reauthRequired', connState.id, reason);
     connState.authState.authenticated = false;
     connState.authState.tokenExp = undefined;
     connState.socket.write(this.messageBuilder.buildErrorResponse(
@@ -373,6 +373,7 @@ export class OIDCProxy extends EventEmitter {
       391,
       'ReauthenticationRequired'
     ));
+    this.emit('reauthRequired', connState.id, reason);
   }
 
   private async forwardCommand(connState: ConnectionState, msg: FullMessage): Promise<void> {
