@@ -14,6 +14,7 @@ class MockJWTValidator extends JWTValidator {
     this.mockResult = result;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async validate(_token: string): Promise<JWTValidationResult> {
     return this.mockResult;
   }
@@ -39,21 +40,43 @@ function buildOpMsg(doc: Record<string, unknown>, requestId = 1): Buffer {
   return Buffer.concat([header, flagBits, sectionKind, bsonDoc]);
 }
 
-// Helper to wait for a complete MongoDB response
-function waitForResponse(client: net.Socket): Promise<Buffer> {
-  return new Promise((resolve) => {
-    const chunks: Buffer[] = [];
+// Helper class to read multiple responses from a socket
+class ResponseReader {
+  private buffer = Buffer.alloc(0);
+  private resolvers: Array<(data: Buffer) => void> = [];
+
+  constructor(client: net.Socket) {
     client.on('data', (chunk) => {
-      chunks.push(chunk);
-      const data = Buffer.concat(chunks);
-      if (data.length >= 4) {
-        const expectedLen = data.readInt32LE(0);
-        if (data.length >= expectedLen) {
-          resolve(data);
-        }
-      }
+      this.buffer = Buffer.concat([this.buffer, chunk]);
+      this.processBuffer();
     });
-  });
+  }
+
+  private processBuffer(): void {
+    while (this.buffer.length >= 4 && this.resolvers.length > 0) {
+      const expectedLen = this.buffer.readInt32LE(0);
+      if (this.buffer.length >= expectedLen) {
+        const response = this.buffer.subarray(0, expectedLen);
+        this.buffer = this.buffer.subarray(expectedLen);
+        const resolve = this.resolvers.shift();
+        if (resolve) resolve(Buffer.from(response));
+      } else {
+        break;
+      }
+    }
+  }
+
+  read(): Promise<Buffer> {
+    return new Promise((resolve) => {
+      this.resolvers.push(resolve);
+      this.processBuffer();
+    });
+  }
+}
+
+// Helper to wait for a complete MongoDB response (single use)
+function waitForResponse(client: net.Socket): Promise<Buffer> {
+  return new ResponseReader(client).read();
 }
 
 describe('MessageBuilder', function() {
@@ -235,8 +258,6 @@ describe('MessageBuilder', function() {
 });
 
 describe('OIDCProxy', function() {
-  this.timeout(10_000);
-
   let hostport: string;
 
   before(() => {
@@ -337,7 +358,7 @@ describe('OIDCProxy', function() {
         clientId: 'test-client',
         connectionString: `mongodb://${hostport}`,
         listenPort: 0,
-        connectionTimeoutMs: 100 // Very short timeout for testing
+        connectionTimeoutMs: 50 // Very short timeout for testing
       };
 
       const proxy = new OIDCProxy(config);
@@ -578,5 +599,303 @@ describe('JWTValidator', function() {
       'https://api.example.com'
     );
     assert(validator !== null);
+  });
+});
+
+describe('OIDCProxy with mock validator', function() {
+  let hostport: string;
+
+  before(() => {
+    if (!process.env.MONGODB_HOSTPORT) {
+      throw new Error('MONGODB_HOSTPORT not set');
+    }
+    hostport = process.env.MONGODB_HOSTPORT;
+  });
+
+  describe('successful authentication via saslStart', () => {
+    it('authenticates when JWT is valid in saslStart payload', async() => {
+      const mockValidator = new MockJWTValidator({
+        valid: true,
+        subject: 'test-user@example.com',
+        exp: Math.floor(Date.now() / 1000) + 3600 // 1 hour from now
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+      const authSuccessPromise = once(proxy, 'authSuccess');
+
+      // Send saslStart with a JWT in payload
+      const msg = buildOpMsg({
+        saslStart: 1,
+        mechanism: 'MONGODB-OIDC',
+        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+        $db: 'admin'
+      });
+
+      const client = new net.Socket();
+      const responsePromise = waitForResponse(client);
+
+      client.connect(addr.port, 'localhost', () => {
+        client.write(msg);
+      });
+
+      const [connId, subject] = await authSuccessPromise;
+      assert(typeof connId === 'number');
+      assert(subject.includes('test-user@example.com'));
+
+      const response = await responsePromise;
+      const bsonData = response.subarray(21);
+      const parsed = deserialize(bsonData);
+
+      assert.strictEqual(parsed.ok, 1);
+      assert.strictEqual(parsed.done, true); // Auth complete
+
+      client.destroy();
+      await proxy.stop();
+    });
+  });
+
+  describe('saslStart without JWT', () => {
+    it('returns IdP info when no JWT in payload', async() => {
+      const mockValidator = new MockJWTValidator({
+        valid: true,
+        subject: 'test-user@example.com',
+        exp: Math.floor(Date.now() / 1000) + 3600
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+
+      const client = new net.Socket();
+      const responsePromise = waitForResponse(client);
+
+      client.connect(addr.port, 'localhost', () => {
+        const msg = buildOpMsg({
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({}))),
+          $db: 'admin'
+        });
+        client.write(msg);
+      });
+
+      const response = await responsePromise;
+      const parsed = deserialize(response.subarray(21));
+
+      assert.strictEqual(parsed.ok, 1);
+      assert.strictEqual(parsed.done, false);
+      assert(typeof parsed.conversationId === 'number');
+
+      client.destroy();
+      await proxy.stop();
+    });
+  });
+
+  describe('command forwarding after auth', () => {
+    it('emits commandForwarded event on successful forward', async() => {
+      const mockValidator = new MockJWTValidator({
+        valid: true,
+        subject: 'test-user@example.com',
+        exp: Math.floor(Date.now() / 1000) + 3600
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+      const commandForwardedPromise = once(proxy, 'commandForwarded');
+
+      const client = new net.Socket();
+      const reader = new ResponseReader(client);
+      await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
+
+      // Authenticate
+      const saslStartMsg = buildOpMsg({
+        saslStart: 1,
+        mechanism: 'MONGODB-OIDC',
+        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+        $db: 'admin'
+      }, 1);
+
+      client.write(saslStartMsg);
+      await reader.read(); // Wait for auth response
+
+      // Send a find command (requestId 2)
+      const findMsg = buildOpMsg({ find: 'test', $db: 'test' }, 2);
+      client.write(findMsg);
+
+      const [connId, dbName, cmdName] = await commandForwardedPromise;
+      assert(typeof connId === 'number');
+      assert.strictEqual(dbName, 'test');
+      assert.strictEqual(cmdName, 'find');
+
+      client.destroy();
+      await proxy.stop();
+    });
+  });
+
+  describe('token expiration handling', () => {
+    it('returns reauth error when token is expired', async() => {
+      const mockValidator = new MockJWTValidator({
+        valid: true,
+        subject: 'test-user@example.com',
+        exp: Math.floor(Date.now() / 1000) - 10 // Already expired
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+      const reauthPromise = once(proxy, 'reauthRequired');
+
+      const client = new net.Socket();
+      const reader = new ResponseReader(client);
+      await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
+
+      // Authenticate (will succeed but token is expired)
+      const saslStartMsg = buildOpMsg({
+        saslStart: 1,
+        mechanism: 'MONGODB-OIDC',
+        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+        $db: 'admin'
+      }, 1);
+
+      client.write(saslStartMsg);
+      await reader.read(); // Wait for auth response
+
+      // Send a command - should trigger reauth
+      const findMsg = buildOpMsg({ find: 'test', $db: 'test' }, 2);
+      client.write(findMsg);
+
+      const [connId, reason] = await reauthPromise;
+      assert(typeof connId === 'number');
+      assert(reason.includes('expired'));
+
+      client.destroy();
+      await proxy.stop();
+    });
+
+    it('returns reauth error when saslStart JWT is expired', async() => {
+      const mockValidator = new MockJWTValidator({
+        valid: false,
+        errorCode: JWTValidationError.EXPIRED,
+        error: 'Token expired'
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+
+      const client = new net.Socket();
+      const responsePromise = waitForResponse(client);
+
+      client.connect(addr.port, 'localhost', () => {
+        const msg = buildOpMsg({
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({ jwt: 'expired.jwt.token' }))),
+          $db: 'admin'
+        });
+        client.write(msg);
+      });
+
+      const response = await responsePromise;
+      const bsonData = response.subarray(21);
+      const parsed = deserialize(bsonData);
+
+      assert.strictEqual(parsed.ok, 0);
+      assert.strictEqual(parsed.code, 391); // ReauthenticationRequired
+      assert(parsed.errmsg.includes('Reauthentication required'));
+
+      client.destroy();
+      await proxy.stop();
+    });
+  });
+
+  describe('auth failure handling', () => {
+    it('returns error when JWT is invalid in saslStart', async() => {
+      const mockValidator = new MockJWTValidator({
+        valid: false,
+        errorCode: JWTValidationError.INVALID,
+        error: 'Invalid signature'
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+
+      // When JWT is invalid in saslStart, it falls back to returning IdP info
+      // (so client can get a new token)
+      const client = new net.Socket();
+      const responsePromise = waitForResponse(client);
+
+      client.connect(addr.port, 'localhost', () => {
+        const msg = buildOpMsg({
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({ jwt: 'invalid.jwt.token' }))),
+          $db: 'admin'
+        });
+        client.write(msg);
+      });
+
+      const response = await responsePromise;
+      const parsed = deserialize(response.subarray(21));
+
+      // Since JWT was invalid (not expired), it returns IdP info for retry
+      assert.strictEqual(parsed.ok, 1);
+      assert.strictEqual(parsed.done, false);
+
+      client.destroy();
+      await proxy.stop();
+    });
   });
 });
