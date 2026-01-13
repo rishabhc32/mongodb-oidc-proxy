@@ -599,3 +599,93 @@ export async function ParseMessage(data: Uint8Array): Promise<{ msg: FullMessage
     readBytes: header.messageLength
   };
 }
+
+export { OpCode };
+
+export interface SaslCommandInfo {
+  type: 'saslStart' | 'saslContinue' | null;
+  mechanism?: string;
+  payload?: Uint8Array;
+  conversationId?: number;
+  db?: string;
+}
+
+export function getSaslCommand (msg: FullMessage): SaslCommandInfo {
+  if (msg.contents.opCode !== 'OP_MSG') {
+    return { type: null };
+  }
+
+  const opMsg = msg.contents as OpMsg;
+  const bodySection = opMsg.sections.find(s => s.kind === 'Body') as OpMsgBodySection | undefined;
+  if (!bodySection) {
+    return { type: null };
+  }
+
+  const doc = bodySection.body.data;
+  const db = doc.$db || 'admin';
+
+  if (doc.saslStart === 1) {
+    return {
+      type: 'saslStart',
+      mechanism: doc.mechanism,
+      payload: doc.payload?._bsontype === 'Binary' ? doc.payload.value() : undefined,
+      db
+    };
+  }
+
+  if (doc.saslContinue === 1) {
+    return {
+      type: 'saslContinue',
+      conversationId: doc.conversationId,
+      payload: doc.payload?._bsontype === 'Binary' ? doc.payload.value() : undefined,
+      db
+    };
+  }
+
+  return { type: null };
+}
+
+export function getCommandDb (msg: FullMessage): string | null {
+  if (msg.contents.opCode !== 'OP_MSG') {
+    return null;
+  }
+
+  const opMsg = msg.contents as OpMsg;
+  const bodySection = opMsg.sections.find(s => s.kind === 'Body') as OpMsgBodySection | undefined;
+  if (!bodySection) {
+    return null;
+  }
+
+  return bodySection.body.data.$db || null;
+}
+
+export function getCommandName (msg: FullMessage): string | null {
+  if (msg.contents.opCode !== 'OP_MSG') {
+    return null;
+  }
+
+  const opMsg = msg.contents as OpMsg;
+  const bodySection = opMsg.sections.find(s => s.kind === 'Body') as OpMsgBodySection | undefined;
+  if (!bodySection) {
+    return null;
+  }
+
+  const doc = bodySection.body.data;
+  // The first key in the document is the command name
+  const keys = Object.keys(doc).filter(k => !k.startsWith('$'));
+  return keys.length > 0 ? keys[0] : null;
+}
+
+export function getCommandBody (msg: FullMessage): Record<string, unknown> | null {
+  if (msg.contents.opCode !== 'OP_MSG') {
+    return null;
+  }
+
+  const opMsg = msg.contents as OpMsg;
+  const bodySection = opMsg.sections.find(s => s.kind === 'Body') as OpMsgBodySection | undefined;
+  if (!bodySection) {
+    return null;
+  }
+
+  return bodySection.body.data;
+}
