@@ -344,6 +344,7 @@ export class OIDCProxy extends EventEmitter {
 
       const cachedPassword = this.userPasswordCache.get(email);
       if (cachedPassword) {
+        this.emit('debug', connId, `User found in cache ${email}`);
         return {
           username: email,
           password: cachedPassword
