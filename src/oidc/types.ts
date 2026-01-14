@@ -21,6 +21,7 @@ export interface OIDCAuthState {
   conversationId: number;
   authenticated: boolean;
   principalName?: string;
+  email?: string;
   tokenExp?: number;
 }
 

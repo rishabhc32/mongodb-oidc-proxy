@@ -1,4 +1,6 @@
 import net from 'net';
+import * as crypto from 'crypto';
+import { URL } from 'url';
 import { EventEmitter } from 'events';
 import { MongoClient, Document } from 'mongodb';
 import { deserialize, Long } from 'bson';
@@ -13,6 +15,13 @@ interface ConnectionState {
   socket: net.Socket;
   parser: WireProtocolParser;
   authState: OIDCAuthState;
+  userClient?: MongoClient;
+}
+
+interface BackendInfo {
+  protocol: string;
+  host: string;
+  params: URLSearchParams;
 }
 
 const DEFAULT_MAX_CONNECTIONS = 10000;
@@ -29,6 +38,7 @@ export class OIDCProxy extends EventEmitter {
   private conversationIdCounter = 0;
   private maxConnections: number;
   private connectionTimeoutMs: number;
+  private backendInfo: BackendInfo;
 
   constructor(config: OIDCProxyConfig, jwtValidator?: JWTValidator) {
     super();
@@ -37,6 +47,17 @@ export class OIDCProxy extends EventEmitter {
     this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
     this.jwtValidator = jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
     this.messageBuilder = new MessageBuilder();
+
+    const url = new URL(config.connectionString);
+    const params = url.searchParams;
+    params.set('authSource', 'admin');
+
+    this.backendInfo = {
+      protocol: url.protocol,
+      host: url.host,
+      params
+    };
+
     this.backendClient = new MongoClient(config.connectionString);
     this.server = net.createServer(socket => this.handleConnection(socket));
   }
@@ -116,8 +137,11 @@ export class OIDCProxy extends EventEmitter {
     socket.pipe(parser);
 
     // Clean up on socket close
-    socket.on('close', () => {
+    socket.on('close', async () => {
       this.emit('connectionClosed', connId);
+      if (connState.userClient) {
+        await connState.userClient.close().catch(() => { });
+      }
       this.connections.delete(connId);
       parser.destroy();
     });
@@ -196,14 +220,21 @@ export class OIDCProxy extends EventEmitter {
       const result = await this.jwtValidator.validate(jwt);
 
       if (result.valid) {
+        const email = result.email!;
+        const success = await this.provisionUser(connState, msg.header.requestID, email);
+        if (!success) {
+          return;
+        }
+
         connState.authState.authenticated = true;
         connState.authState.principalName = result.subject;
+        connState.authState.email = email;
         connState.authState.tokenExp = result.exp;
         connState.socket.write(this.messageBuilder.buildAuthSuccessResponse(
           msg.header.requestID,
           connState.authState.conversationId
         ));
-        this.emit('authSuccess', connState.id, result.subject + ' (via saslStart)');
+        this.emit('authSuccess', connState.id, `${result.subject} (${email}) (via saslStart)`);
         return;
       }
 
@@ -263,15 +294,71 @@ export class OIDCProxy extends EventEmitter {
       return;
     }
 
+    const email = result.email!;
+    const success = await this.provisionUser(connState, msg.header.requestID, email);
+    if (!success) {
+      return;
+    }
+
     // Authentication successful
     connState.authState.authenticated = true;
     connState.authState.principalName = result.subject;
+    connState.authState.email = email;
     connState.authState.tokenExp = result.exp;
     connState.socket.write(this.messageBuilder.buildAuthSuccessResponse(
       msg.header.requestID,
       connState.authState.conversationId
     ));
-    this.emit('authSuccess', connState.id, result.subject + ' (via saslContinue)');
+    this.emit('authSuccess', connState.id, `${result.subject} (${email}) (via saslContinue)`);
+  }
+
+  private async provisionUser(connState: ConnectionState, requestId: number, email: string): Promise<boolean> {
+    this.emit('debug', connState.id, `Checking roles for ${email}...`);
+    const adminDb = this.backendClient.db('admin');
+
+    // Verify role exists
+    const rolesInfo = await adminDb.command({ rolesInfo: email });
+    if (!rolesInfo.roles || rolesInfo.roles.length === 0) {
+      this.emit('debug', connState.id, `Role ${email} not found`);
+      connState.socket.write(this.messageBuilder.buildAuthFailureResponse(
+        requestId,
+        `Role '${email}' not defined in MongoDB`
+      ));
+      return false;
+    }
+
+    // Create/Update user with random password
+    const password = crypto.randomBytes(32).toString('base64');
+
+    try {
+      await adminDb.command({
+        updateUser: email,
+        pwd: password,
+        roles: [{ role: email, db: 'admin' }]
+      });
+      this.emit('debug', connState.id, `Updated user ${email}`);
+    } catch (err: any) {
+      if (err.code === 11) { // UserNotFound
+        await adminDb.command({
+          createUser: email,
+          pwd: password,
+          roles: [{ role: email, db: 'admin' }]
+        });
+        this.emit('debug', connState.id, `Created user ${email}`);
+      } else {
+        throw err;
+      }
+    }
+
+    // Create dedicated connection for this user
+    const { protocol, host, params } = this.backendInfo;
+    const userClient = new MongoClient(
+      `${protocol}//${encodeURIComponent(email)}:${encodeURIComponent(password)}@${host}/?${params.toString()}`
+    );
+    await userClient.connect();
+    connState.userClient = userClient;
+
+    return true;
   }
 
   private extractJwtFromPayload(connId: number, payload?: Uint8Array): string | null {
@@ -365,12 +452,11 @@ export class OIDCProxy extends EventEmitter {
     }
 
     try {
-      // Remove $db field as we specify db via the driver
       const command = { ...body };
       delete command.$db;
 
-      const db = this.backendClient.db(dbName);
-      const result = await db.command(command as Document);
+      // Use the dedicated user client
+      const result = await connState.userClient!.db(dbName).command(command as Document);
 
       // Ensure cursor.id is a proper BSON Long type for mongosh compatibility
       if (result.cursor && result.cursor.id !== undefined) {

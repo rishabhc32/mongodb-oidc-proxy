@@ -10,6 +10,7 @@ export interface JWTValidationResult {
   valid: boolean;
   payload?: JWTPayload;
   subject?: string;
+  email?: string;
   exp?: number;
   errorCode?: JWTValidationError;
   error?: string;
@@ -48,10 +49,21 @@ export class JWTValidator {
         };
       }
 
+      // Verify email exists
+      const email = (payload as Record<string, unknown>).email as string | undefined;
+      if (!email) {
+        return {
+          valid: false,
+          errorCode: JWTValidationError.INVALID,
+          error: 'Email claim is required in JWT'
+        };
+      }
+
       return {
         valid: true,
         payload,
         subject: payload.sub,
+        email,
         exp: payload.exp
       };
     } catch (err) {

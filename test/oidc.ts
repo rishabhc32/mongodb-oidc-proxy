@@ -2,6 +2,7 @@ import assert from 'assert';
 import { deserialize, serialize, Binary } from 'bson';
 import net from 'net';
 import { once } from 'events';
+import { MongoClient } from 'mongodb';
 import { MessageBuilder, OIDCProxy, JWTValidator, JWTValidationError } from '../src/oidc';
 import type { OIDCProxyConfig, JWTValidationResult } from '../src/oidc';
 
@@ -613,10 +614,29 @@ describe('OIDCProxy with mock validator', function() {
   });
 
   describe('successful authentication via saslStart', () => {
+    before(async () => {
+      const client = new MongoClient(`mongodb://${hostport}`);
+      await client.connect();
+      try {
+        await client.db('admin').command({
+          createRole: 'test-user@example.com',
+          privileges: [],
+          roles: []
+        });
+      } catch (err: any) {
+        if (err.code !== 11000 && !err.message.includes('already exists')) {
+          throw err;
+        }
+      } finally {
+        await client.close();
+      }
+    });
+
     it('authenticates when JWT is valid in saslStart payload', async() => {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: 'test-user@example.com',
+        email: 'test-user@example.com',
         exp: Math.floor(Date.now() / 1000) + 3600 // 1 hour from now
       });
 
@@ -669,6 +689,7 @@ describe('OIDCProxy with mock validator', function() {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: 'test-user@example.com',
+        email: 'test-user@example.com',
         exp: Math.floor(Date.now() / 1000) + 3600
       });
 
@@ -714,6 +735,7 @@ describe('OIDCProxy with mock validator', function() {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: 'test-user@example.com',
+        email: 'test-user@example.com',
         exp: Math.floor(Date.now() / 1000) + 3600
       });
 
@@ -764,6 +786,7 @@ describe('OIDCProxy with mock validator', function() {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: 'test-user@example.com',
+        email: 'test-user@example.com',
         exp: Math.floor(Date.now() / 1000) - 10 // Already expired
       });
 
@@ -853,6 +876,52 @@ describe('OIDCProxy with mock validator', function() {
   });
 
   describe('auth failure handling', () => {
+    it('returns error when email claim is missing', async() => {
+      const mockValidator = new MockJWTValidator({
+        valid: false,
+        errorCode: JWTValidationError.INVALID,
+        error: 'Email claim is required in JWT'
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+
+      const client = new net.Socket();
+      const responsePromise = waitForResponse(client);
+
+      client.connect(addr.port, 'localhost', () => {
+        const msg = buildOpMsg({
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({ jwt: 'no.email.jwt.token' }))),
+          $db: 'admin'
+        });
+        client.write(msg);
+      });
+
+      const response = await responsePromise;
+      const parsed = deserialize(response.subarray(21));
+
+      // It should fall back to IdP info for retry, or return error? 
+      // Current OIDCProxy logic for !result.valid in saslStart:
+      // if (result.errorCode === JWTValidationError.EXPIRED) -> sendReauthRequired (391)
+      // otherwise -> return IdP info (ok: 1, done: false)
+      assert.strictEqual(parsed.ok, 1);
+      assert.strictEqual(parsed.done, false);
+
+      client.destroy();
+      await proxy.stop();
+    });
+
     it('returns error when JWT is invalid in saslStart', async() => {
       const mockValidator = new MockJWTValidator({
         valid: false,
