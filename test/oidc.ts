@@ -3,8 +3,10 @@ import { deserialize, serialize, Binary } from 'bson';
 import net from 'net';
 import { once } from 'events';
 import { MongoClient } from 'mongodb';
-import { MessageBuilder, OIDCProxy, JWTValidator, JWTValidationError } from '../src/oidc';
-import type { OIDCProxyConfig, JWTValidationResult } from '../src/oidc';
+import { MessageBuilder, OIDCProxy, JWTValidator, JWTValidationError } from '@src/oidc';
+import type { OIDCProxyConfig, JWTValidationResult } from '@src/oidc';
+import * as random from '@src/utils/random';
+import sinon from 'sinon';
 
 // Mock JWTValidator for testing authenticated flows
 class MockJWTValidator extends JWTValidator {
@@ -269,7 +271,7 @@ describe('OIDCProxy', function() {
   });
 
   describe('connection handling', () => {
-    it('emits newConnection event on client connect', async() => {
+    it('emits newConnection event on client connect', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://example.com',
         clientId: 'test-client',
@@ -294,7 +296,7 @@ describe('OIDCProxy', function() {
       await proxy.stop();
     });
 
-    it('emits connectionClosed event on client disconnect', async() => {
+    it('emits connectionClosed event on client disconnect', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://example.com',
         clientId: 'test-client',
@@ -320,7 +322,7 @@ describe('OIDCProxy', function() {
       await proxy.stop();
     });
 
-    it('respects maxConnections limit', async() => {
+    it('respects maxConnections limit', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://example.com',
         clientId: 'test-client',
@@ -353,7 +355,7 @@ describe('OIDCProxy', function() {
       await proxy.stop();
     });
 
-    it('emits connectionTimeout on idle connections', async() => {
+    it('emits connectionTimeout on idle connections', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://example.com',
         clientId: 'test-client',
@@ -378,8 +380,90 @@ describe('OIDCProxy', function() {
     });
   });
 
+  describe('provisioning cache and singleflight', () => {
+    const email = 'cache-test@example.com';
+    let adminClient: MongoClient;
+
+    before(async () => {
+      adminClient = new MongoClient(`mongodb://${hostport}`);
+      await adminClient.connect();
+      await adminClient.db('admin').command({
+        createRole: email,
+        privileges: [],
+        roles: []
+      });
+    });
+
+    after(async () => {
+      const adminDb = adminClient.db('admin');
+      await adminDb.command({ dropUser: email }).catch(() => { });
+      await adminDb.command({ dropRole: email }).catch(() => { });
+      await adminClient.close();
+    });
+
+    it('reuses cached password for repeated provisions', async () => {
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config);
+      await proxy.start();
+
+      const socket = new net.Socket();
+      const firstClient = await (proxy as any).provisionUser(1, socket, 1, email);
+      const firstPassword = (proxy as any).userPasswordCache.get(email);
+      await firstClient?.close();
+
+      const secondClient = await (proxy as any).provisionUser(1, socket, 1, email);
+      const secondPassword = (proxy as any).userPasswordCache.get(email);
+      await secondClient?.close();
+
+      assert.strictEqual(firstPassword, secondPassword);
+
+      await proxy.stop();
+    });
+
+    it('deduplicates concurrent provisions via singleflight', async () => {
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config);
+      await proxy.start();
+      (proxy as any).userPasswordCache.clear();
+
+      let calls = 0;
+      const stub = sinon.stub(random, 'randomBytes').callsFake((size: number) => {
+        calls += 1;
+        return Buffer.alloc(size);
+      });
+
+      try {
+        const socket = new net.Socket();
+        const [clientA, clientB] = await Promise.all([
+          (proxy as any).provisionUser(1, socket, 1, email),
+          (proxy as any).provisionUser(1, socket, 1, email)
+        ]);
+
+        await clientA?.close();
+        await clientB?.close();
+
+        assert.strictEqual(calls, 1);
+      } finally {
+        stub.restore();
+        await proxy.stop();
+      }
+    });
+  });
+
   describe('hello/ismaster handling', () => {
-    it('responds to hello command with OIDC mechanism', async() => {
+    it('responds to hello command with OIDC mechanism', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://example.com',
         clientId: 'test-client',
@@ -417,7 +501,7 @@ describe('OIDCProxy', function() {
   });
 
   describe('SASL authentication flow', () => {
-    it('returns IdP info on saslStart without JWT', async() => {
+    it('returns IdP info on saslStart without JWT', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://auth.example.com',
         clientId: 'my-client-id',
@@ -462,7 +546,7 @@ describe('OIDCProxy', function() {
       await proxy.stop();
     });
 
-    it('rejects commands without authentication', async() => {
+    it('rejects commands without authentication', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://example.com',
         clientId: 'test-client',
@@ -501,7 +585,7 @@ describe('OIDCProxy', function() {
       await proxy.stop();
     });
 
-    it('allows ping without authentication', async() => {
+    it('allows ping without authentication', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://example.com',
         clientId: 'test-client',
@@ -535,7 +619,7 @@ describe('OIDCProxy', function() {
   });
 
   describe('saslContinue handling', () => {
-    it('rejects saslContinue with invalid conversationId', async() => {
+    it('rejects saslContinue with invalid conversationId', async () => {
       const config: OIDCProxyConfig = {
         issuer: 'https://example.com',
         clientId: 'test-client',
@@ -632,7 +716,7 @@ describe('OIDCProxy with mock validator', function() {
       }
     });
 
-    it('authenticates when JWT is valid in saslStart payload', async() => {
+    it('authenticates when JWT is valid in saslStart payload', async () => {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: 'test-user@example.com',
@@ -685,7 +769,7 @@ describe('OIDCProxy with mock validator', function() {
   });
 
   describe('saslStart without JWT', () => {
-    it('returns IdP info when no JWT in payload', async() => {
+    it('returns IdP info when no JWT in payload', async () => {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: 'test-user@example.com',
@@ -731,7 +815,7 @@ describe('OIDCProxy with mock validator', function() {
   });
 
   describe('command forwarding after auth', () => {
-    it('emits commandForwarded event on successful forward', async() => {
+    it('emits commandForwarded event on successful forward', async () => {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: 'test-user@example.com',
@@ -782,7 +866,7 @@ describe('OIDCProxy with mock validator', function() {
   });
 
   describe('token expiration handling', () => {
-    it('returns reauth error when token is expired', async() => {
+    it('returns reauth error when token is expired', async () => {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: 'test-user@example.com',
@@ -830,7 +914,7 @@ describe('OIDCProxy with mock validator', function() {
       await proxy.stop();
     });
 
-    it('returns reauth error when saslStart JWT is expired', async() => {
+    it('returns reauth error when saslStart JWT is expired', async () => {
       const mockValidator = new MockJWTValidator({
         valid: false,
         errorCode: JWTValidationError.EXPIRED,
@@ -876,7 +960,7 @@ describe('OIDCProxy with mock validator', function() {
   });
 
   describe('auth failure handling', () => {
-    it('returns error when email claim is missing', async() => {
+    it('returns error when email claim is missing', async () => {
       const mockValidator = new MockJWTValidator({
         valid: false,
         errorCode: JWTValidationError.INVALID,
@@ -911,7 +995,7 @@ describe('OIDCProxy with mock validator', function() {
       const response = await responsePromise;
       const parsed = deserialize(response.subarray(21));
 
-      // It should fall back to IdP info for retry, or return error? 
+      // It should fall back to IdP info for retry, or return error?
       // Current OIDCProxy logic for !result.valid in saslStart:
       // if (result.errorCode === JWTValidationError.EXPIRED) -> sendReauthRequired (391)
       // otherwise -> return IdP info (ok: 1, done: false)
@@ -922,7 +1006,7 @@ describe('OIDCProxy with mock validator', function() {
       await proxy.stop();
     });
 
-    it('returns error when JWT is invalid in saslStart', async() => {
+    it('returns error when JWT is invalid in saslStart', async () => {
       const mockValidator = new MockJWTValidator({
         valid: false,
         errorCode: JWTValidationError.INVALID,

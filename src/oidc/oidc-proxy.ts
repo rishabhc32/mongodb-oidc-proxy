@@ -1,16 +1,17 @@
 import net, { Server } from 'net';
-import * as crypto from 'crypto';
 import { URL } from 'url';
 import { EventEmitter } from 'events';
 import { promisify } from 'util';
 import { MongoClient, Document } from 'mongodb';
 import { deserialize, Long } from 'bson';
-import { WireProtocolParser } from '../parse-stream';
-import { FullMessage, getSaslCommand, getCommandDb, getCommandBody } from '../parse';
-import { JWTValidator, JWTValidationError } from './jwt-validator';
-import { MessageBuilder } from './message-builder';
-import { Singleflight } from '../utils/sync';
-import type { OIDCProxyConfig, OIDCAuthState, IdpInfo } from './types';
+import { LRUCache } from 'lru-cache';
+import { WireProtocolParser } from '@src/parse-stream';
+import { FullMessage, getSaslCommand, getCommandDb, getCommandBody } from '@src/parse';
+import { JWTValidator, JWTValidationError } from '@src/oidc/jwt-validator';
+import { MessageBuilder } from '@src/oidc/message-builder';
+import { Singleflight } from '@src/utils/sync';
+import { randomBytes } from '@src/utils/random';
+import type { OIDCProxyConfig, OIDCAuthState, IdpInfo } from '@src/oidc/types';
 
 interface ConnectionState {
   id: number;
@@ -28,6 +29,7 @@ interface BackendInfo {
 
 const DEFAULT_MAX_CONNECTIONS = 10000;
 const DEFAULT_CONNECTION_TIMEOUT_MS = 120000;
+const PASSWORD_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // Cache user passwords for 24h to avoid rapid rotations
 
 export class OIDCProxy extends EventEmitter {
   private server: Server;
@@ -42,6 +44,10 @@ export class OIDCProxy extends EventEmitter {
   private connectionTimeoutMs: number;
   private backendInfo: BackendInfo;
   private singleflight = new Singleflight();
+  private userPasswordCache = new LRUCache<string, string>({
+    max: DEFAULT_MAX_CONNECTIONS,
+    ttl: PASSWORD_CACHE_TTL_MS
+  });
 
   constructor(config: OIDCProxyConfig, jwtValidator?: JWTValidator) {
     super();
@@ -223,12 +229,13 @@ export class OIDCProxy extends EventEmitter {
       const result = await this.jwtValidator.validate(jwt);
 
       if (result.valid) {
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         const email = result.email!;
         const userClient = await this.provisionUser(connState.id, connState.socket, msg.header.requestID, email);
         if (!userClient) {
           return;
         }
-        
+
         // Authentication successful
         connState.userClient = userClient;
         connState.authState.authenticated = true;
@@ -299,6 +306,7 @@ export class OIDCProxy extends EventEmitter {
       return;
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const email = result.email!;
     const userClient = await this.provisionUser(connState.id, connState.socket, msg.header.requestID, email);
     if (!userClient) {
@@ -334,8 +342,13 @@ export class OIDCProxy extends EventEmitter {
         return null;
       }
 
+      const cachedPassword = this.userPasswordCache.get(email);
+      if (cachedPassword) {
+        return { username: email, password: cachedPassword };
+      }
+
       // Create/Update user with random password
-      const password = crypto.randomBytes(32).toString('base64');
+      const password = randomBytes(32).toString('base64');
 
       try {
         await adminDb.command({
@@ -357,16 +370,20 @@ export class OIDCProxy extends EventEmitter {
         }
       }
 
-      // Create dedicated connection for this user
-      const { protocol, host, params } = this.backendInfo;
-      const userClient = await new MongoClient(
-        `${protocol}//${encodeURIComponent(email)}:${encodeURIComponent(password)}@${host}/?${params.toString()}`
-      ).connect();
+      // Set the new password in the cache
+      this.userPasswordCache.set(email, password);
 
-      return userClient;
+      return { username: email, password };
     });
 
-    return value;
+    if (!value) {
+      return null;
+    }
+
+    const { protocol, host, params } = this.backendInfo;
+    return new MongoClient(
+      `${protocol}//${encodeURIComponent(value.username)}:${encodeURIComponent(value.password)}@${host}/?${params.toString()}`
+    ).connect();
   }
 
   private extractJwtFromPayload(connId: number, payload?: Uint8Array): string | null {
@@ -462,6 +479,7 @@ export class OIDCProxy extends EventEmitter {
       delete command.$db;
 
       // Use the dedicated user client
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       const result = await connState.userClient!.db(dbName).command(command as Document);
 
       // Ensure cursor.id is a proper BSON Long type for mongosh compatibility
