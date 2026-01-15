@@ -225,9 +225,10 @@ export class OIDCProxy extends EventEmitter {
     // Try to authenticate with JWT from payload
     const jwt = this.extractJwtFromPayload(connState.id, payload);
     if (jwt) {
-      this.emit('debug', connState.id, 'saslStart has JWT, validating...');
-      const result = await this.jwtValidator.validate(jwt);
+      const decodedJwt = this.decodeJwtPayload(jwt);
+      this.emit('authAttempt', connState.id, decodedJwt?.email, decodedJwt);
 
+      const result = await this.jwtValidator.validate(jwt);
       if (result.valid) {
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         const email = result.email!;
@@ -246,11 +247,11 @@ export class OIDCProxy extends EventEmitter {
           msg.header.requestID,
           connState.authState.conversationId
         ));
-        this.emit('authSuccess', connState.id, `${result.subject} (${email}) (via saslStart)`);
+        this.emit('authSuccess', connState.id, email, result.subject);
         return;
       }
 
-      this.emit('debug', connState.id, `JWT validation failed: ${result.errorCode} - ${result.error}`);
+      this.emit('debug', connState.id, result?.email, `JWT validation failed: ${result.errorCode} - ${result.error}`);
 
       if (result.errorCode === JWTValidationError.EXPIRED) {
         this.sendReauthRequired(connState, msg.header.requestID, 'access token has expired');
@@ -295,6 +296,9 @@ export class OIDCProxy extends EventEmitter {
       return;
     }
 
+    const decodedJwt = this.decodeJwtPayload(jwt);
+    this.emit('authAttempt', connState.id, decodedJwt?.email, decodedJwt);
+
     // Validate JWT
     const result = await this.jwtValidator.validate(jwt);
     if (!result.valid) {
@@ -302,7 +306,7 @@ export class OIDCProxy extends EventEmitter {
         msg.header.requestID,
         `Authentication failed: ${result.error}`
       ));
-      this.emit('authFailed', connState.id, result.error);
+      this.emit('authFailed', connState.id, result?.email, result.error);
       return;
     }
 
@@ -323,18 +327,18 @@ export class OIDCProxy extends EventEmitter {
       msg.header.requestID,
       connState.authState.conversationId
     ));
-    this.emit('authSuccess', connState.id, `${result.subject} (${email}) (via saslContinue)`);
+    this.emit('authSuccess', connState.id, email, result.subject);
   }
 
   private async provisionUser(connId: number, socket: net.Socket, requestId: number, email: string): Promise<MongoClient | null> {
     const { value } = await this.singleflight.do(email, async () => {
-      this.emit('debug', connId, `Checking roles for ${email}...`);
+      this.emit('debug', connId, email, `Checking roles for ${email}...`);
       const adminDb = this.backendClient.db('admin');
 
       // Verify role exists
       const rolesInfo = await adminDb.command({ rolesInfo: email });
       if (!rolesInfo.roles || rolesInfo.roles.length === 0) {
-        this.emit('debug', connId, `Role ${email} not found in DB`);
+        this.emit('debug', connId, email, `Role ${email} not found in DB`);
         socket.write(this.messageBuilder.buildAuthFailureResponse(
           requestId,
           `Role '${email}' not defined`
@@ -344,7 +348,7 @@ export class OIDCProxy extends EventEmitter {
 
       const cachedPassword = this.userPasswordCache.get(email);
       if (cachedPassword) {
-        this.emit('debug', connId, `User found in cache ${email}`);
+        this.emit('debug', connId, email, `User found in cache ${email}`);
         return {
           username: email,
           password: cachedPassword
@@ -360,7 +364,7 @@ export class OIDCProxy extends EventEmitter {
           pwd: password,
           roles: [{ role: email, db: 'admin' }]
         });
-        this.emit('debug', connId, `Updated user ${email}`);
+        this.emit('debug', connId, email, `Updated user ${email}`);
       } catch (err: any) {
         if (err.codeName === 'UserNotFound') {
           await adminDb.command({
@@ -368,7 +372,7 @@ export class OIDCProxy extends EventEmitter {
             pwd: password,
             roles: [{ role: email, db: 'admin' }]
           });
-          this.emit('debug', connId, `Created user ${email}`);
+          this.emit('debug', connId, email, `Created user ${email}`);
         } else {
           throw err;
         }
@@ -395,7 +399,7 @@ export class OIDCProxy extends EventEmitter {
 
   private extractJwtFromPayload(connId: number, payload?: Uint8Array): string | null {
     if (!payload || payload.length === 0) {
-      this.emit('debug', connId, 'saslStart with empty payload');
+      this.emit('debug', connId, null, 'saslStart with empty payload');
       return null;
     }
 
@@ -403,25 +407,27 @@ export class OIDCProxy extends EventEmitter {
     try {
       payloadDoc = deserialize(payload);
     } catch (err) {
-      this.emit('debug', connId, `saslStart payload parse error: ${err}`);
+      this.emit('debug', connId, null, `saslStart payload parse error: ${err}`);
       return null;
     }
 
     const jwt = payloadDoc.jwt as string | undefined;
     if (!jwt) {
-      this.emit('debug', connId, 'saslStart payload has no jwt field');
+      this.emit('debug', connId, null, 'saslStart payload has no jwt field');
       return null;
     }
 
-    // Log JWT payload for debugging
+    return jwt;
+  }
+
+  private decodeJwtPayload(jwt: string): Record<string, unknown> | null {
     try {
       const parts = jwt.split('.');
       if (parts.length === 3) {
-        this.emit('debug', connId, `JWT payload: ${Buffer.from(parts[1], 'base64').toString('utf8')}`);
+        return JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
       }
     } catch { /* ignore */ }
-
-    return jwt;
+    return null;
   }
 
   private async handleHello(connState: ConnectionState, msg: FullMessage): Promise<void> {
@@ -456,7 +462,7 @@ export class OIDCProxy extends EventEmitter {
       391,
       'ReauthenticationRequired'
     ));
-    this.emit('reauthRequired', connState.id, reason);
+    this.emit('reauthRequired', connState.id, connState.authState?.email, reason);
   }
 
   private async forwardCommand(connState: ConnectionState, msg: FullMessage): Promise<void> {
@@ -505,7 +511,7 @@ export class OIDCProxy extends EventEmitter {
       );
       connState.socket.write(response);
 
-      this.emit('commandForwarded', connState.id, dbName, Object.keys(command)[0]);
+      this.emit('commandForwarded', connState.id, connState.authState.email, dbName, Object.keys(command)[0], command, result);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       const response = this.messageBuilder.buildErrorResponse(
@@ -513,7 +519,7 @@ export class OIDCProxy extends EventEmitter {
         errorMessage
       );
       connState.socket.write(response);
-      this.emit('commandError', connState.id, errorMessage);
+      this.emit('commandError', connState.id, connState.authState.email, errorMessage);
     }
   }
 }

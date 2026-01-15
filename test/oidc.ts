@@ -855,8 +855,9 @@ describe('OIDCProxy with mock validator', function() {
       const findMsg = buildOpMsg({ find: 'test', $db: 'test' }, 2);
       client.write(findMsg);
 
-      const [connId, dbName, cmdName] = await commandForwardedPromise;
+      const [connId, user, dbName, cmdName] = await commandForwardedPromise;
       assert(typeof connId === 'number');
+      assert.strictEqual(user, 'test-user@example.com');
       assert.strictEqual(dbName, 'test');
       assert.strictEqual(cmdName, 'find');
 
@@ -906,8 +907,9 @@ describe('OIDCProxy with mock validator', function() {
       const findMsg = buildOpMsg({ find: 'test', $db: 'test' }, 2);
       client.write(findMsg);
 
-      const [connId, reason] = await reauthPromise;
+      const [connId, user, reason] = await reauthPromise;
       assert(typeof connId === 'number');
+      assert.strictEqual(user, 'test-user@example.com');
       assert(reason.includes('expired'));
 
       client.destroy();

@@ -3,9 +3,13 @@ import { OIDCProxy, OIDCProxyConfig } from '@src/oidc';
 import type { FullMessage } from '@src/parse';
 import { EJSON } from 'bson';
 
+type OptionalUser = string | null | undefined;
+
 interface ParsedArgs {
+  help: boolean;
   ndjson: boolean;
   oidcMode: boolean;
+  logLevel: 'debug' | 'info';
   issuer?: string;
   clientId?: string;
   connectionString?: string;
@@ -16,8 +20,10 @@ interface ParsedArgs {
 
 function parseArgs (argv: string[]): ParsedArgs {
   const args: ParsedArgs = {
+    help: false,
     ndjson: false,
     oidcMode: false,
+    logLevel: 'info',
     positional: []
   };
 
@@ -25,10 +31,17 @@ function parseArgs (argv: string[]): ParsedArgs {
   while (i < argv.length) {
     const arg = argv[i];
 
-    if (arg === '--ndjson') {
+    if (arg === '--help' || arg === '-h') {
+      args.help = true;
+    } else if (arg === '--ndjson') {
       args.ndjson = true;
     } else if (arg === '--oidc-mode') {
       args.oidcMode = true;
+    } else if (arg === '--log-level' && i + 1 < argv.length) {
+      const level = argv[++i];
+      if (level === 'debug' || level === 'info') {
+        args.logLevel = level;
+      }
     } else if (arg === '--issuer' && i + 1 < argv.length) {
       args.issuer = argv[++i];
     } else if (arg === '--client-id' && i + 1 < argv.length) {
@@ -59,7 +72,9 @@ OIDC termination mode:
   mongodb-wp-proxy --oidc-mode [options] <[localhost:]localport>
 
 Options:
+  --help, -h            Show this help message and exit
   --ndjson              Output in newline-delimited JSON format
+  --log-level <level>   Log level: 'debug' or 'info' (default: info)
   --oidc-mode           Enable OIDC authentication termination mode
   --issuer <url>        OIDC issuer URL (required for OIDC mode)
   --client-id <id>      OAuth client ID to return to clients (required for OIDC mode)
@@ -80,6 +95,18 @@ function parseAddress (str: string): { host: string; port: number } | { path: st
   return { host, port: +port };
 }
 
+function normalizeUser (user: OptionalUser): string | null {
+  return user ?? null;
+}
+
+function formatLogPrefix (connId: number, user?: OptionalUser): string {
+  return `[${connId}]${user ? ` [${user}]` : ''}`;
+}
+
+function utcnow (): string {
+  return new Date().toISOString();
+}
+
 async function runTransparentProxy (args: ParsedArgs): Promise<void> {
   const targetStr = args.positional[0];
   const localStr = args.positional[1];
@@ -96,14 +123,14 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('newConnection', (conn: ConnectionPair) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'newConnection', conn }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'newConnection', conn }));
     } else {
       console.log(`[${conn.id} outgoing] New connection from ${conn.incoming}`);
     }
 
     conn.on('connectionEnded', (source: string) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ev: 'connectionEnded', conn, source }));
+        console.log(JSON.stringify({ ts: utcnow(), ev: 'connectionEnded', conn, source }));
       } else {
         console.log(`[${conn.id} ${source}] Connection closed`);
       }
@@ -111,7 +138,7 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
 
     conn.on('connectionError', (source: string, err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ev: 'connectionError', conn, source, err: err.message }));
+        console.log(JSON.stringify({ ts: utcnow(), ev: 'connectionError', conn, source, err: err.message }));
       } else {
         console.log(`[${conn.id} ${source}] Connection error: ${err.message}`);
       }
@@ -119,7 +146,7 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
 
     conn.on('message', (source: string, msg: FullMessage) => {
       if (args.ndjson) {
-        console.log(EJSON.stringify({ ev: 'message', conn: conn.toJSON(), source, msg }));
+        console.log(EJSON.stringify({ ts: utcnow(), ev: 'message', conn: conn.toJSON(), source, msg }));
       } else {
         console.log(`[${conn.id} ${source}] Message received`);
         console.dir(msg.contents, { depth: Infinity, customInspect: true });
@@ -128,7 +155,7 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
 
     conn.on('parseError', (source: string, err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ev: 'parseError', conn, source, err: err.message }));
+        console.log(JSON.stringify({ ts: utcnow(), ev: 'parseError', conn, source, err: err.message }));
       } else {
         console.log(`[${conn.id} ${source}] Failed to parse message: ${err.message}`);
       }
@@ -137,7 +164,7 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
 
   await proxy.listen(local);
   if (args.ndjson) {
-    console.log(JSON.stringify({ ev: 'listening', addr: proxy.address(), local, target }));
+    console.log(JSON.stringify({ ts: utcnow(), ev: 'listening', addr: proxy.address(), local, target }));
   } else {
     console.log('Listening on', proxy.address(), 'forwarding', local, 'to', target);
   }
@@ -177,7 +204,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('listening', (addr) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'listening', addr, mode: 'oidc', issuer: config.issuer }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'listening', addr, mode: 'oidc', issuer: config.issuer }));
     } else {
       console.log(`OIDC Proxy listening on ${addr.address}:${addr.port}`);
       console.log(`  Issuer: ${config.issuer}`);
@@ -187,7 +214,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('backendConnected', () => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'backendConnected' }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'backendConnected' }));
     } else {
       console.log('Connected to backend MongoDB');
     }
@@ -195,7 +222,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('newConnection', (conn: { id: number; incoming: string }) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'newConnection', conn }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'newConnection', conn }));
     } else {
       console.log(`[${conn.id}] New connection from ${conn.incoming}`);
     }
@@ -203,7 +230,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('connectionClosed', (connId: number) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'connectionClosed', connId }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'connectionClosed', connId }));
     } else {
       console.log(`[${connId}] Connection closed`);
     }
@@ -211,7 +238,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('connectionError', (connId: number, err: Error) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'connectionError', connId, err: err.message }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'connectionError', connId, err: err.message }));
     } else {
       console.log(`[${connId}] Connection error: ${err.message}`);
     }
@@ -219,47 +246,60 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('saslStart', (connId: number, idpInfo: { issuer: string; clientId: string }) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'saslStart', connId, idpInfo }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'saslStart', connId, idpInfo }));
     } else {
       console.log(`[${connId}] SASL start - returning IdP info`);
     }
   });
 
-  proxy.on('authSuccess', (connId: number, subject: string) => {
+  proxy.on('authAttempt', (connId: number, user: OptionalUser, jwt: Record<string, unknown> | null) => {
+    const normalizedUser = normalizeUser(user);
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'authSuccess', connId, subject }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'authAttempt', connId, user: normalizedUser, jwt }));
     } else {
-      console.log(`[${connId}] Authentication successful for: ${subject}`);
+      console.log(`${formatLogPrefix(connId, normalizedUser)} Attempting JWT authentication: ${JSON.stringify(jwt)}`);
     }
   });
 
-  proxy.on('authFailed', (connId: number, error: string) => {
+  proxy.on('authSuccess', (connId: number, user: string, subject: string) => {
+    const normalizedUser = normalizeUser(user);
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'authFailed', connId, error }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'authSuccess', connId, user: normalizedUser, subject }));
     } else {
-      console.log(`[${connId}] Authentication failed: ${error}`);
+      console.log(`[${connId}] [${normalizedUser}] Authentication successful for: ${subject}`);
     }
   });
 
-  proxy.on('commandForwarded', (connId: number, db: string, cmd: string) => {
+  proxy.on('authFailed', (connId: number, user: OptionalUser, error: string) => {
+    const normalizedUser = normalizeUser(user);
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'commandForwarded', connId, db, cmd }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'authFailed', connId, user: normalizedUser, error }));
     } else {
-      console.log(`[${connId}] Forwarded command: ${db}.${cmd}`);
+      console.log(`${formatLogPrefix(connId, normalizedUser)} Authentication failed: ${error}`);
     }
   });
 
-  proxy.on('commandError', (connId: number, error: string) => {
+  proxy.on('commandForwarded', (connId: number, user: string, db: string, cmd: string, request: any, response: any) => {
+    const normalizedUser = normalizeUser(user);
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'commandError', connId, error }));
+      console.log(EJSON.stringify({ ts: utcnow(), ev: 'commandForwarded', connId, user: normalizedUser, db, cmd, request, response }));
     } else {
-      console.log(`[${connId}] Command error: ${error}`);
+      console.log(`[${connId}] [${normalizedUser}] Forwarded command: ${db}.${cmd}`);
+    }
+  });
+
+  proxy.on('commandError', (connId: number, user: string, error: string) => {
+    const normalizedUser = normalizeUser(user);
+    if (args.ndjson) {
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'commandError', connId, user: normalizedUser, error }));
+    } else {
+      console.log(`[${connId}] [${normalizedUser}] Command error: ${error}`);
     }
   });
 
   proxy.on('parseError', (connId: number, err: Error) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'parseError', connId, err: err.message }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'parseError', connId, err: err.message }));
     } else {
       console.log(`[${connId}] Parse error: ${err.message}`);
     }
@@ -267,33 +307,38 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('authRequired', (connId: number, cmdName: string | null) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'authRequired', connId, cmdName }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'authRequired', connId, cmdName }));
     } else {
       console.log(`[${connId}] Auth required for command: ${cmdName || 'unknown'}`);
     }
   });
 
-  proxy.on('debug', (connId: number, message: string) => {
+  proxy.on('debug', (connId: number, user: OptionalUser, message: string) => {
+    if (args.logLevel !== 'debug') {
+      return;
+    }
+    const normalizedUser = normalizeUser(user);
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'debug', connId, message }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'debug', connId, user: normalizedUser, message }));
     } else {
-      console.log(`[${connId}] DEBUG: ${message}`);
+      console.log(`${formatLogPrefix(connId, normalizedUser)} DEBUG: ${message}`);
     }
   });
 
   proxy.on('connectionTimeout', (connId: number) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'connectionTimeout', connId }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'connectionTimeout', connId }));
     } else {
       console.log(`[${connId}] Connection timed out`);
     }
   });
 
-  proxy.on('reauthRequired', (connId: number, cmdName: string | null) => {
+  proxy.on('reauthRequired', (connId: number, user: OptionalUser, reason: string) => {
+    const normalizedUser = normalizeUser(user);
     if (args.ndjson) {
-      console.log(JSON.stringify({ ev: 'reauthRequired', connId, cmdName }));
+      console.log(JSON.stringify({ ts: utcnow(), ev: 'reauthRequired', connId, user: normalizedUser, reason }));
     } else {
-      console.log(`[${connId}] Reauthentication required for command: ${cmdName || 'unknown'} (token expired)`);
+      console.log(`${formatLogPrefix(connId, normalizedUser)} Reauthentication required: ${reason}`);
     }
   });
 
@@ -303,7 +348,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 (async () => {
   const args = parseArgs(process.argv);
 
-  if (args.positional.length === 0 && !args.oidcMode) {
+  if (args.help || (args.positional.length === 0 && !args.oidcMode)) {
     printUsage();
     return;
   }
