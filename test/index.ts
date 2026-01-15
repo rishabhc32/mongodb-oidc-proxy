@@ -26,7 +26,7 @@ describe('Proxy', function() {
     events = [];
     proxy = new Proxy({ host: hostport.split(':')[0], port: +hostport.split(':')[1] });
     proxy.on('newConnection', (conn: any) => {
-      conn.on('connectionEnded', (source: string) => events.push({ ev: 'connectionEnded', source }));
+      conn.on('connectionClosed', (source: string) => events.push({ ev: 'connectionClosed', source }));
       conn.on('connectionError', (source: string, err: Error) => events.push({ ev: 'connectionError', source, err }));
       conn.on('message', (source: string, msg: any) => events.push({ ev: 'message', source, msg }));
       conn.on('parseError', (source: string, err: Error) => events.push({ ev: 'parseError', source, err }));

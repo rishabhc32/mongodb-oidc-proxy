@@ -5,7 +5,7 @@ import { EJSON } from 'bson';
 
 type OptionalUser = string | null | undefined;
 
-interface ParsedArgs {
+export interface ParsedArgs {
   help: boolean;
   ndjson: boolean;
   oidcMode: boolean;
@@ -18,7 +18,7 @@ interface ParsedArgs {
   positional: string[];
 }
 
-function parseArgs (argv: string[]): ParsedArgs {
+export function parseArgs (argv: string[]): ParsedArgs {
   const args: ParsedArgs = {
     help: false,
     ndjson: false,
@@ -62,6 +62,17 @@ function parseArgs (argv: string[]): ParsedArgs {
   return args;
 }
 
+export function parseAddress (str: string): { host: string; port: number } | { path: string } {
+  if (str.startsWith('/') || str.includes('\\')) {
+    return { path: str };
+  }
+  const [host, port] = str.split(':');
+  if (port === undefined) {
+    return { host: 'localhost', port: +host };
+  }
+  return { host, port: +port };
+}
+
 function printUsage (): void {
   console.log(`usage: mongodb-wp-proxy [options] <args>
 
@@ -82,17 +93,6 @@ Options:
   --jwks-uri <url>      Custom JWKS endpoint (optional, defaults to issuer/.well-known/jwks.json)
   --audience <aud>      Expected JWT audience claim (optional)
 `);
-}
-
-function parseAddress (str: string): { host: string; port: number } | { path: string } {
-  if (str.startsWith('/') || str.includes('\\')) {
-    return { path: str };
-  }
-  const [host, port] = str.split(':');
-  if (port === undefined) {
-    return { host: 'localhost', port: +host };
-  }
-  return { host, port: +port };
 }
 
 function normalizeUser (user: OptionalUser): string | null {
@@ -478,17 +478,19 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
   await proxy.start();
 }
 
-(async () => {
-  const args = parseArgs(process.argv);
+if (require.main === module) {
+  (async () => {
+    const args = parseArgs(process.argv);
 
-  if (args.help || (args.positional.length === 0 && !args.oidcMode)) {
-    printUsage();
-    return;
-  }
+    if (args.help || (args.positional.length === 0 && !args.oidcMode)) {
+      printUsage();
+      return;
+    }
 
-  if (args.oidcMode) {
-    await runOIDCProxy(args);
-  } else {
-    await runTransparentProxy(args);
-  }
-})().catch((err: Error) => process.nextTick(() => { throw err; }));
+    if (args.oidcMode) {
+      await runOIDCProxy(args);
+    } else {
+      await runTransparentProxy(args);
+    }
+  })().catch((err: Error) => process.nextTick(() => { throw err; }));
+}
