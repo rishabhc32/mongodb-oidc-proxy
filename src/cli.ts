@@ -123,31 +123,43 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('newConnection', (conn: ConnectionPair) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ts: utcnow(), ev: 'newConnection', conn, bytes_in_total: 0, bytes_out_total: 0 }));
+      console.log(JSON.stringify({
+        ts: utcnow(),
+        ev: 'newConnection',
+        conn,
+        bytes_in_total: 0,
+        bytes_out_total: 0
+      }));
     } else {
-      console.log(`[${conn.id} outgoing] New connection from ${conn.incoming}`);
+      console.log(`[${conn.connId} outgoing] New connection from ${conn.incoming}`);
     }
 
-    conn.on('connectionEnded', (source: string) => {
+    conn.on('connectionClosed', (source: string) => {
       if (args.ndjson) {
         console.log(JSON.stringify({
           ts: utcnow(),
-          ev: 'connectionEnded',
+          ev: 'connectionClosed',
           conn,
           source,
           bytes_in_total: conn.bytesIn,
           bytes_out_total: conn.bytesOut
         }));
       } else {
-        console.log(`[${conn.id} ${source}] Connection closed`);
+        console.log(`[${conn.connId} ${source}] Connection closed`);
       }
     });
 
     conn.on('connectionError', (source: string, err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'connectionError', conn, source, err: err.message }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'connectionError',
+          conn,
+          source,
+          err: err.message
+        }));
       } else {
-        console.log(`[${conn.id} ${source}] Connection error: ${err.message}`);
+        console.log(`[${conn.connId} ${source}] Connection error: ${err.message}`);
       }
     });
 
@@ -163,23 +175,35 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
           bytes_out_total: conn.bytesOut
         }));
       } else {
-        console.log(`[${conn.id} ${source}] Message received`);
+        console.log(`[${conn.connId} ${source}] Message received`);
         console.dir(msg.contents, { depth: Infinity, customInspect: true });
       }
     });
 
     conn.on('parseError', (source: string, err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'parseError', conn, source, err: err.message }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'parseError',
+          conn,
+          source,
+          err: err.message
+        }));
       } else {
-        console.log(`[${conn.id} ${source}] Failed to parse message: ${err.message}`);
+        console.log(`[${conn.connId} ${source}] Failed to parse message: ${err.message}`);
       }
     });
   });
 
   await proxy.listen(local);
   if (args.ndjson) {
-    console.log(JSON.stringify({ ts: utcnow(), ev: 'listening', addr: proxy.address(), local, target }));
+    console.log(JSON.stringify({
+      ts: utcnow(),
+      ev: 'listening',
+      addr: proxy.address(),
+      local,
+      target
+    }));
   } else {
     console.log('Listening on', proxy.address(), 'forwarding', local, 'to', target);
   }
@@ -219,7 +243,13 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('listening', (addr) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ts: utcnow(), ev: 'listening', addr, mode: 'oidc', issuer: config.issuer }));
+      console.log(JSON.stringify({
+        ts: utcnow(),
+        ev: 'listening',
+        addr,
+        mode: 'oidc',
+        issuer: config.issuer
+      }));
     } else {
       console.log(`OIDC Proxy listening on ${addr.address}:${addr.port}`);
       console.log(`  Issuer: ${config.issuer}`);
@@ -229,7 +259,10 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('backendConnected', () => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ts: utcnow(), ev: 'backendConnected' }));
+      console.log(JSON.stringify({
+        ts: utcnow(),
+        ev: 'backendConnected'
+      }));
     } else {
       console.log('Connected to backend MongoDB');
     }
@@ -237,9 +270,15 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
 
   proxy.on('newConnection', (conn: OIDCConnection) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({ ts: utcnow(), ev: 'newConnection', conn: conn.toJSON(), bytes_in_total: 0, bytes_out_total: 0 }));
+      console.log(JSON.stringify({
+        ts: utcnow(),
+        ev: 'newConnection',
+        conn: conn.toJSON(),
+        bytes_in_total: 0,
+        bytes_out_total: 0
+      }));
     } else {
-      console.log(`[${conn.id}] New connection from ${conn.incoming}`);
+      console.log(`[${conn.connId}] New connection from ${conn.incoming}`);
     }
 
     conn.on('connectionClosed', () => {
@@ -247,55 +286,83 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
         console.log(JSON.stringify({
           ts: utcnow(),
           ev: 'connectionClosed',
-          connId: conn.id,
+          connId: conn.connId,
           bytes_in_total: conn.bytesIn,
           bytes_out_total: conn.bytesOut
         }));
       } else {
-        console.log(`[${conn.id}] Connection closed (in: ${conn.bytesIn} bytes, out: ${conn.bytesOut} bytes)`);
+        console.log(`[${conn.connId}] Connection closed (in: ${conn.bytesIn} bytes, out: ${conn.bytesOut} bytes)`);
       }
     });
 
     conn.on('connectionError', (err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'connectionError', connId: conn.id, err: err.message }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'connectionError',
+          connId: conn.connId,
+          err: err.message
+        }));
       } else {
-        console.log(`[${conn.id}] Connection error: ${err.message}`);
+        console.log(`[${conn.connId}] Connection error: ${err.message}`);
       }
     });
 
-    conn.on('saslStart', (idpInfo: { issuer: string; clientId: string }) => {
+    conn.on('saslStart', () => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'saslStart', connId: conn.id, idpInfo }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'saslStart',
+          connId: conn.connId
+        }));
       } else {
-        console.log(`[${conn.id}] SASL start - returning IdP info`);
+        console.log(`[${conn.connId}] SASL start - returning IdP info`);
       }
     });
 
     conn.on('authAttempt', (user: OptionalUser, jwt: Record<string, unknown> | null) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'authAttempt', connId: conn.id, user: normalizedUser, jwt }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'authAttempt',
+          connId: conn.connId,
+          user: normalizedUser,
+          jwt
+        }));
       } else {
-        console.log(`${formatLogPrefix(conn.id, normalizedUser)} Attempting JWT authentication: ${JSON.stringify(jwt)}`);
+        console.log(`${formatLogPrefix(conn.connId, normalizedUser)} Attempting JWT authentication: ${JSON.stringify(jwt)}`);
       }
     });
 
-    conn.on('authSuccess', (user: string, subject: string) => {
+    conn.on('authSuccess', (user: string, subject?: string) => {
       const normalizedUser = normalizeUser(user);
+      const normalizedSubject = normalizeUser(subject);
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'authSuccess', connId: conn.id, user: normalizedUser, subject }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'authSuccess',
+          connId: conn.connId,
+          user: normalizedUser,
+          subject: normalizedSubject
+        }));
       } else {
-        console.log(`[${conn.id}] [${normalizedUser}] Authentication successful for: ${subject}`);
+        console.log(`[${conn.connId}] [${normalizedUser}] Authentication successful for: ${normalizedSubject}`);
       }
     });
 
     conn.on('authFailed', (user: OptionalUser, error: string) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'authFailed', connId: conn.id, user: normalizedUser, error }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'authFailed',
+          connId: conn.connId,
+          user: normalizedUser,
+          error
+        }));
       } else {
-        console.log(`${formatLogPrefix(conn.id, normalizedUser)} Authentication failed: ${error}`);
+        console.log(`${formatLogPrefix(conn.connId, normalizedUser)} Authentication failed: ${error}`);
       }
     });
 
@@ -305,7 +372,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
         console.log(EJSON.stringify({
           ts: utcnow(),
           ev: 'commandForwarded',
-          connId: conn.id,
+          connId: conn.connId,
           user: normalizedUser,
           db,
           cmd,
@@ -315,32 +382,50 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
           bytes_out_total: conn.bytesOut
         }));
       } else {
-        console.log(`[${conn.id}] [${normalizedUser}] Forwarded command: ${db}.${cmd}`);
+        console.log(`[${conn.connId}] [${normalizedUser}] Forwarded command: ${db}.${cmd}`);
       }
     });
 
     conn.on('commandError', (user: string, error: string) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'commandError', connId: conn.id, user: normalizedUser, error }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'commandError',
+          connId: conn.connId,
+          user: normalizedUser,
+          error,
+          bytes_in_total: conn.bytesIn,
+          bytes_out_total: conn.bytesOut
+        }));
       } else {
-        console.log(`[${conn.id}] [${normalizedUser}] Command error: ${error}`);
+        console.log(`[${conn.connId}] [${normalizedUser}] Command error: ${error}`);
       }
     });
 
     conn.on('parseError', (err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'parseError', connId: conn.id, err: err.message }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'parseError',
+          connId: conn.connId,
+          err: err.message
+        }));
       } else {
-        console.log(`[${conn.id}] Parse error: ${err.message}`);
+        console.log(`[${conn.connId}] Parse error: ${err.message}`);
       }
     });
 
     conn.on('authRequired', (cmdName: string | null) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'authRequired', connId: conn.id, cmdName }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'authRequired',
+          connId: conn.connId,
+          cmdName
+        }));
       } else {
-        console.log(`[${conn.id}] Auth required for command: ${cmdName || 'unknown'}`);
+        console.log(`[${conn.connId}] Auth required for command: ${cmdName || 'unknown'}`);
       }
     });
 
@@ -350,26 +435,42 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
       }
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'debug', connId: conn.id, user: normalizedUser, message }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'debug',
+          connId: conn.connId,
+          user: normalizedUser,
+          message
+        }));
       } else {
-        console.log(`${formatLogPrefix(conn.id, normalizedUser)} DEBUG: ${message}`);
+        console.log(`${formatLogPrefix(conn.connId, normalizedUser)} DEBUG: ${message}`);
       }
     });
 
     conn.on('connectionTimeout', () => {
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'connectionTimeout', connId: conn.id }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'connectionTimeout',
+          connId: conn.connId
+        }));
       } else {
-        console.log(`[${conn.id}] Connection timed out`);
+        console.log(`[${conn.connId}] Connection timed out`);
       }
     });
 
     conn.on('reauthRequired', (user: OptionalUser, reason: string) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({ ts: utcnow(), ev: 'reauthRequired', connId: conn.id, user: normalizedUser, reason }));
+        console.log(JSON.stringify({
+          ts: utcnow(),
+          ev: 'reauthRequired',
+          connId: conn.connId,
+          user: normalizedUser,
+          reason
+        }));
       } else {
-        console.log(`${formatLogPrefix(conn.id, normalizedUser)} Reauthentication required: ${reason}`);
+        console.log(`${formatLogPrefix(conn.connId, normalizedUser)} Reauthentication required: ${reason}`);
       }
     });
   });

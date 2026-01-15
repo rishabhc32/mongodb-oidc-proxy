@@ -11,7 +11,7 @@ import { JWTValidator, JWTValidationError } from '@src/oidc/jwt-validator';
 import { MessageBuilder } from '@src/oidc/message-builder';
 import { Singleflight } from '@src/utils/sync';
 import { randomBytes } from '@src/utils/random';
-import type { OIDCProxyConfig, OIDCAuthState, IdpInfo } from '@src/oidc/types';
+import type { OIDCProxyConfig, IdpInfo } from '@src/oidc/types';
 
 const DEFAULT_MAX_CONNECTIONS = 10000;
 const DEFAULT_CONNECTION_TIMEOUT_MS = 120000;
@@ -23,17 +23,127 @@ interface BackendInfo {
   params: URLSearchParams;
 }
 
+export class OIDCProxy extends EventEmitter {
+  private server: Server;
+  private backendClient: MongoClient;
+  private jwtValidator: JWTValidator;
+  private messageBuilder: MessageBuilder;
+  private connections: Map<number, OIDCConnection> = new Map();
+  private connectionIdCounter = 0;
+  private maxConnections: number;
+  private connectionTimeoutMs: number;
+  private backendInfo: BackendInfo;
+  private singleflight = new Singleflight();
+  private userPasswordCache = new LRUCache<string, string>({
+    max: DEFAULT_MAX_CONNECTIONS,
+    ttl: PASSWORD_CACHE_TTL_MS
+  });
+
+  private idpInfo: IdpInfo;
+  private listenPort: number;
+  private listenHost?: string;
+
+  constructor(config: OIDCProxyConfig, jwtValidator?: JWTValidator) {
+    super();
+    this.maxConnections = config.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
+    this.jwtValidator = jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
+    this.messageBuilder = new MessageBuilder();
+    this.idpInfo = { issuer: config.issuer, clientId: config.clientId };
+    this.listenPort = config.listenPort;
+    this.listenHost = config.listenHost;
+
+    const url = new URL(config.connectionString);
+    const params = url.searchParams;
+    params.set('authSource', 'admin');
+
+    this.backendInfo = {
+      protocol: url.protocol,
+      host: url.host,
+      params
+    };
+
+    this.backendClient = new MongoClient(config.connectionString);
+    this.server = net.createServer(socket => this.handleConnection(socket));
+  }
+
+  async start(): Promise<void> {
+    await this.backendClient.connect();
+    this.emit('backendConnected');
+
+    return new Promise((resolve, reject) => {
+      this.server.listen(this.listenPort, this.listenHost || 'localhost', () => {
+        this.emit('listening', this.server.address());
+        resolve();
+      });
+      this.server.on('error', reject);
+    });
+  }
+
+  async stop(): Promise<void> {
+    for (const conn of this.connections.values()) {
+      conn.emit('connectionClosed');
+    }
+
+    const closeServer = promisify(this.server.close.bind(this.server));
+    await Promise.allSettled([
+      closeServer(),
+      this.backendClient.close()
+    ]);
+  }
+
+  address(): net.AddressInfo | string | null {
+    return this.server.address();
+  }
+
+  private handleConnection(socket: net.Socket): void {
+    const connId = ++this.connectionIdCounter;
+
+    // Reject if max connections exceeded
+    if (this.connections.size >= this.maxConnections) {
+      socket.destroy();
+      return;
+    }
+
+    const remoteAddr = `${socket.remoteAddress}:${socket.remotePort}`;
+    const conn = new OIDCConnection(
+      connId,
+      remoteAddr,
+      socket,
+      this.connectionTimeoutMs,
+      this.backendClient,
+      this.jwtValidator,
+      this.messageBuilder,
+      this.userPasswordCache,
+      this.singleflight,
+      this.backendInfo,
+      this.idpInfo
+    );
+
+    this.connections.set(connId, conn);
+
+    conn.on('connectionClosed', () => {
+      this.connections.delete(connId);
+    });
+
+    this.emit('newConnection', conn);
+  }
+}
+
 export class OIDCConnection extends EventEmitter {
-  id: number;
+  connId: number;
   incoming: string;
   bytesIn: number;
   bytesOut: number;
 
   private socket: net.Socket;
   private parser: WireProtocolParser;
-  private authState: OIDCAuthState;
   private userClient?: MongoClient;
   private conversationId = 0;
+  private authenticated = false;
+  private subject?: string;
+  private email?: string;
+  private tokenExp?: number;
   private backendClient: MongoClient;
   private jwtValidator: JWTValidator;
   private messageBuilder: MessageBuilder;
@@ -56,7 +166,7 @@ export class OIDCConnection extends EventEmitter {
     idpInfo: IdpInfo
   ) {
     super();
-    this.id = id;
+    this.connId = id;
     this.incoming = incoming;
     this.bytesIn = 0;
     this.bytesOut = 0;
@@ -69,10 +179,6 @@ export class OIDCConnection extends EventEmitter {
     this.backendInfo = backendInfo;
     this.idpInfo = idpInfo;
     this.parser = new WireProtocolParser();
-    this.authState = {
-      conversationId: 0,
-      authenticated: false
-    };
 
     this.setupSocket(timeoutMs);
   }
@@ -119,7 +225,7 @@ export class OIDCConnection extends EventEmitter {
 
   toJSON() {
     return {
-      id: this.id,
+      id: this.connId,
       incoming: this.incoming,
       bytesIn: this.bytesIn,
       bytesOut: this.bytesOut
@@ -157,7 +263,7 @@ export class OIDCConnection extends EventEmitter {
     }
 
     // For non-auth commands, check if authenticated
-    if (!this.authState.authenticated) {
+    if (!this.authenticated) {
       const body = getCommandBody(msg);
       const cmdName = body ? Object.keys(body).find(k => !k.startsWith('$')) : null;
 
@@ -189,7 +295,7 @@ export class OIDCConnection extends EventEmitter {
   }
 
   private async handleSaslStart(msg: FullMessage, payload?: Uint8Array): Promise<void> {
-    this.authState.conversationId = ++this.conversationId;
+    ++this.conversationId;
 
     // Try to authenticate with JWT from payload
     const jwt = this.extractJwtFromPayload(payload);
@@ -208,15 +314,16 @@ export class OIDCConnection extends EventEmitter {
 
         // Authentication successful
         this.userClient = userClient;
-        this.authState.authenticated = true;
-        this.authState.principalName = result.subject;
-        this.authState.email = email;
-        this.authState.tokenExp = result.exp;
+        this.authenticated = true;
+        this.email = email;
+        this.subject = result.subject;
+        this.tokenExp = result.exp;
+
         this.write(this.messageBuilder.buildAuthSuccessResponse(
           msg.header.requestID,
-          this.authState.conversationId
+          this.conversationId
         ));
-        this.emit('authSuccess', email, result.subject);
+        this.emit('authSuccess', email, this.subject);
         return;
       }
 
@@ -231,7 +338,7 @@ export class OIDCConnection extends EventEmitter {
     // No JWT or validation failed - return IdP info for OIDC flow
     this.write(this.messageBuilder.buildSaslStartResponse(
       msg.header.requestID,
-      this.authState.conversationId,
+      this.conversationId,
       this.idpInfo
     ));
     this.emit('saslStart', this.idpInfo);
@@ -239,7 +346,7 @@ export class OIDCConnection extends EventEmitter {
 
   private async handleSaslContinue(msg: FullMessage, payload?: Uint8Array, conversationId?: number): Promise<void> {
     // Validate conversationId matches the one from saslStart
-    if (conversationId !== this.authState.conversationId) {
+    if (conversationId !== this.conversationId) {
       this.write(this.messageBuilder.buildAuthFailureResponse(
         msg.header.requestID,
         'Invalid conversationId'
@@ -279,13 +386,14 @@ export class OIDCConnection extends EventEmitter {
 
     // Authentication successful
     this.userClient = userClient;
-    this.authState.authenticated = true;
-    this.authState.principalName = result.subject;
-    this.authState.email = email;
-    this.authState.tokenExp = result.exp;
+    this.authenticated = true;
+    this.subject = result.subject;
+    this.email = email;
+    this.tokenExp = result.exp;
+
     this.write(this.messageBuilder.buildAuthSuccessResponse(
       msg.header.requestID,
-      this.authState.conversationId
+      this.conversationId
     ));
     this.emit('authSuccess', email, result.subject);
   }
@@ -414,15 +522,16 @@ export class OIDCConnection extends EventEmitter {
   }
 
   private sendReauthRequired(requestID: number, reason: string): void {
-    this.authState.authenticated = false;
-    this.authState.tokenExp = undefined;
+    this.authenticated = false;
+    this.tokenExp = undefined;
+
     this.write(this.messageBuilder.buildErrorResponse(
       requestID,
       `Reauthentication required: ${reason}`,
       391,
       'ReauthenticationRequired'
     ));
-    this.emit('reauthRequired', this.authState?.email, reason);
+    this.emit('reauthRequired', this.email, reason);
   }
 
   private async forwardCommand(msg: FullMessage): Promise<void> {
@@ -440,7 +549,7 @@ export class OIDCConnection extends EventEmitter {
 
     // Check if token has expired - return ReauthenticationRequired (code 391) if so
     // This allows compliant drivers to reauthenticate without dropping the connection
-    const tokenExp = this.authState.tokenExp;
+    const tokenExp = this.tokenExp;
     if (tokenExp && Math.floor(Date.now() / 1000) >= tokenExp) {
       const cmdName = Object.keys(body).find(k => !k.startsWith('$')) || 'unknown';
       this.sendReauthRequired(msg.header.requestID, `command ${cmdName} - token expired`);
@@ -471,7 +580,7 @@ export class OIDCConnection extends EventEmitter {
       );
       this.write(response);
 
-      this.emit('commandForwarded', this.authState.email, dbName, Object.keys(command)[0], command, result);
+      this.emit('commandForwarded', this.email, dbName, Object.keys(command)[0], command, result);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       const response = this.messageBuilder.buildErrorResponse(
@@ -479,113 +588,7 @@ export class OIDCConnection extends EventEmitter {
         errorMessage
       );
       this.write(response);
-      this.emit('commandError', this.authState.email, errorMessage);
+      this.emit('commandError', this.email, errorMessage);
     }
-  }
-}
-
-export class OIDCProxy extends EventEmitter {
-  private server: Server;
-  private backendClient: MongoClient;
-  private jwtValidator: JWTValidator;
-  private messageBuilder: MessageBuilder;
-  private connections: Map<number, OIDCConnection> = new Map();
-  private connectionIdCounter = 0;
-  private maxConnections: number;
-  private connectionTimeoutMs: number;
-  private backendInfo: BackendInfo;
-  private singleflight = new Singleflight();
-  private userPasswordCache = new LRUCache<string, string>({
-    max: DEFAULT_MAX_CONNECTIONS,
-    ttl: PASSWORD_CACHE_TTL_MS
-  });
-  private idpInfo: IdpInfo;
-  private listenPort: number;
-  private listenHost?: string;
-
-  constructor(config: OIDCProxyConfig, jwtValidator?: JWTValidator) {
-    super();
-    this.maxConnections = config.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
-    this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
-    this.jwtValidator = jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
-    this.messageBuilder = new MessageBuilder();
-    this.idpInfo = { issuer: config.issuer, clientId: config.clientId };
-    this.listenPort = config.listenPort;
-    this.listenHost = config.listenHost;
-
-    const url = new URL(config.connectionString);
-    const params = url.searchParams;
-    params.set('authSource', 'admin');
-
-    this.backendInfo = {
-      protocol: url.protocol,
-      host: url.host,
-      params
-    };
-
-    this.backendClient = new MongoClient(config.connectionString);
-    this.server = net.createServer(socket => this.handleConnection(socket));
-  }
-
-  async start(): Promise<void> {
-    await this.backendClient.connect();
-    this.emit('backendConnected');
-
-    return new Promise((resolve, reject) => {
-      this.server.listen(this.listenPort, this.listenHost || 'localhost', () => {
-        this.emit('listening', this.server.address());
-        resolve();
-      });
-      this.server.on('error', reject);
-    });
-  }
-
-  async stop(): Promise<void> {
-    for (const conn of this.connections.values()) {
-      conn.emit('connectionClosed');
-    }
-
-    const closeServer = promisify(this.server.close.bind(this.server));
-    await Promise.allSettled([
-      closeServer(),
-      this.backendClient.close()
-    ]);
-  }
-
-  address(): net.AddressInfo | string | null {
-    return this.server.address();
-  }
-
-  private handleConnection(socket: net.Socket): void {
-    const connId = ++this.connectionIdCounter;
-
-    // Reject if max connections exceeded
-    if (this.connections.size >= this.maxConnections) {
-      socket.destroy();
-      return;
-    }
-
-    const remoteAddr = `${socket.remoteAddress}:${socket.remotePort}`;
-    const conn = new OIDCConnection(
-      connId,
-      remoteAddr,
-      socket,
-      this.connectionTimeoutMs,
-      this.backendClient,
-      this.jwtValidator,
-      this.messageBuilder,
-      this.userPasswordCache,
-      this.singleflight,
-      this.backendInfo,
-      this.idpInfo
-    );
-
-    this.connections.set(connId, conn);
-
-    conn.on('connectionClosed', () => {
-      this.connections.delete(connId);
-    });
-
-    this.emit('newConnection', conn);
   }
 }

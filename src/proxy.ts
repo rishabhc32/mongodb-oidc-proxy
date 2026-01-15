@@ -3,22 +3,22 @@ import { WireProtocolParser } from '@src/parse-stream';
 import { EventEmitter, once } from 'events';
 
 export class ConnectionPair extends EventEmitter {
-  id: number;
+  connId: number;
   incoming: string;
   bytesIn: number;
   bytesOut: number;
 
-  constructor(info: Pick<ConnectionPair, 'id' | 'incoming'>) {
+  constructor(info: Pick<ConnectionPair, 'connId' | 'incoming'>) {
     super();
-    this.id = info.id;
+    this.connId = info.connId;
     this.incoming = info.incoming;
     this.bytesIn = 0;
     this.bytesOut = 0;
   }
 
-  toJSON(): Pick<ConnectionPair, 'id' | 'incoming'> & { bytesIn: number; bytesOut: number } {
+  toJSON(): Pick<ConnectionPair, 'connId' | 'incoming'> & { bytesIn: number; bytesOut: number } {
     return {
-      id: this.id,
+      connId: this.connId,
       incoming: this.incoming,
       bytesIn: this.bytesIn,
       bytesOut: this.bytesOut
@@ -41,7 +41,7 @@ export class Proxy extends EventEmitter {
       const conn1reader = new WireProtocolParser();
       const conn2reader = new WireProtocolParser();
       const cp = new ConnectionPair({
-        id: this.connId++,
+        connId: this.connId++,
         incoming: `${conn1.remoteAddress}:${conn1.remotePort}`
       });
 
@@ -59,12 +59,12 @@ export class Proxy extends EventEmitter {
       });
 
       conn1.on('close', () => {
-        cp.emit('connectionEnded', 'outgoing');
+        cp.emit('connectionClosed', 'outgoing');
         conn2.destroy();
         conn1reader.destroy();
       });
       conn2.on('close', () => {
-        cp.emit('connectionEnded', 'incoming');
+        cp.emit('connectionClosed', 'incoming');
         conn1.destroy();
         conn2reader.destroy();
       });
