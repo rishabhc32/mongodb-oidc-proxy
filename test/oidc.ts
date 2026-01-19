@@ -291,7 +291,7 @@ describe('OIDCProxy', function() {
       client.connect(addr.port, 'localhost');
 
       const [connInfo] = await connectionPromise;
-      assert(connInfo.connId > 0);
+      assert(typeof connInfo.connId === 'string' && connInfo.connId.length > 0);
       assert(typeof connInfo.incoming === 'string');
 
       client.destroy();
@@ -319,7 +319,7 @@ describe('OIDCProxy', function() {
       client.destroy();
 
       await closePromise;
-      assert(conn.connId > 0);
+      assert(typeof conn.connId === 'string' && conn.connId.length > 0);
 
       await proxy.stop();
     });
@@ -363,7 +363,7 @@ describe('OIDCProxy', function() {
         clientId: 'test-client',
         connectionString: `mongodb://${hostport}`,
         listenPort: 0,
-        connectionTimeoutMs: 50 // Very short timeout for testing
+        connectionTimeoutMs: 10 // Very short timeout for testing
       };
 
       const proxy = new OIDCProxy(config);
@@ -376,7 +376,7 @@ describe('OIDCProxy', function() {
       const [conn] = await once(proxy, 'newConnection');
 
       await once(conn, 'connectionTimeout');
-      assert(conn.connId > 0);
+      assert(typeof conn.connId === 'string' && conn.connId.length > 0);
 
       await proxy.stop();
     });

@@ -11,6 +11,7 @@ import { JWTValidator, JWTValidationError } from '@src/oidc/jwt-validator';
 import { MessageBuilder } from '@src/oidc/message-builder';
 import { Singleflight } from '@src/utils/sync';
 import { randomBytes } from '@src/utils/random';
+import { ksuid } from '@src/utils/ksuid';
 import type { OIDCProxyConfig, IdpInfo } from '@src/oidc/types';
 
 const DEFAULT_MAX_CONNECTIONS = 10000;
@@ -28,8 +29,7 @@ export class OIDCProxy extends EventEmitter {
   private backendClient: MongoClient;
   private jwtValidator: JWTValidator;
   private messageBuilder: MessageBuilder;
-  private connections: Map<number, OIDCConnection> = new Map();
-  private connectionIdCounter = 0;
+  private connections: Map<string, OIDCConnection> = new Map();
   private maxConnections: number;
   private connectionTimeoutMs: number;
   private backendInfo: BackendInfo;
@@ -97,7 +97,7 @@ export class OIDCProxy extends EventEmitter {
   }
 
   private handleConnection(socket: Socket): void {
-    const connId = ++this.connectionIdCounter;
+    const connId = ksuid();
 
     // Reject if max connections exceeded
     if (this.connections.size >= this.maxConnections) {
@@ -131,7 +131,7 @@ export class OIDCProxy extends EventEmitter {
 }
 
 export class OIDCConnection extends EventEmitter {
-  connId: number;
+  connId: string;
   incoming: string;
   bytesIn: number;
   bytesOut: number;
@@ -153,7 +153,7 @@ export class OIDCConnection extends EventEmitter {
   private idpInfo: IdpInfo;
 
   constructor(
-    id: number,
+    id: string,
     incoming: string,
     socket: Socket,
     timeoutMs: number,

@@ -1,9 +1,10 @@
 import net, { NetConnectOpts, Server } from 'net';
 import { WireProtocolParser } from '@src/parse-stream';
 import { EventEmitter, once } from 'events';
+import { ksuid } from '@src/utils/ksuid';
 
 export class ConnectionPair extends EventEmitter {
-  connId: number;
+  connId: string;
   incoming: string;
   bytesIn: number;
   bytesOut: number;
@@ -28,12 +29,10 @@ export class ConnectionPair extends EventEmitter {
 
 export class Proxy extends EventEmitter {
   srv: Server;
-  connId: number;
 
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   constructor(target: NetConnectOpts) {
     super();
-    this.connId = 0;
     this.srv = net.createServer();
     this.srv.on('connection', (conn1) => {
       const conn2 = net.createConnection(target);
@@ -41,7 +40,7 @@ export class Proxy extends EventEmitter {
       const conn1reader = new WireProtocolParser();
       const conn2reader = new WireProtocolParser();
       const cp = new ConnectionPair({
-        connId: this.connId++,
+        connId: ksuid(),
         incoming: `${conn1.remoteAddress}:${conn1.remotePort}`
       });
 

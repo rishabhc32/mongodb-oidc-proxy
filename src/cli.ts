@@ -104,7 +104,7 @@ function normalizeUser (user: OptionalUser): string | null {
   return user ?? null;
 }
 
-function formatLogPrefix (connId: number, user?: OptionalUser, tags?: string[]): string {
+function formatLogPrefix (connId: string, user?: OptionalUser, tags?: string[]): string {
   const tagStr = tags && tags.length > 0 ? ` [${tags.join(',')}]` : '';
   return `[${connId}]${user ? ` [${user}]` : ''}${tagStr}`;
 }
@@ -132,7 +132,7 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
       console.log(JSON.stringify({
         ts: utcnow(),
         ev: 'newConnection',
-        conn,
+        connId: conn.connId,
         tags: args.tags,
         bytesInTotal: 0,
         bytesOutTotal: 0
@@ -146,7 +146,7 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
         console.log(JSON.stringify({
           ts: utcnow(),
           ev: 'connectionClosed',
-          conn,
+          connId: conn.connId,
           source,
           tags: args.tags,
           bytesInTotal: conn.bytesIn,
@@ -162,10 +162,10 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
         console.log(JSON.stringify({
           ts: utcnow(),
           ev: 'connectionError',
-          conn,
+          connId: conn.connId,
           source,
           tags: args.tags,
-          err: err.message
+          error: err.message
         }));
       } else {
         console.log(`[${conn.connId} ${source}] Connection error: ${err.message}`);
@@ -177,7 +177,7 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
         console.log(EJSON.stringify({
           ts: utcnow(),
           ev: 'message',
-          conn: conn.toJSON(),
+          connId: conn.connId,
           source,
           msg,
           tags: args.tags,
@@ -195,10 +195,10 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
         console.log(JSON.stringify({
           ts: utcnow(),
           ev: 'parseError',
-          conn,
+          connId: conn.connId,
           source,
           tags: args.tags,
-          err: err.message
+          error: err.message
         }));
       } else {
         console.log(`[${conn.connId} ${source}] Failed to parse message: ${err.message}`);
@@ -285,7 +285,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
       console.log(JSON.stringify({
         ts: utcnow(),
         ev: 'newConnection',
-        conn: conn.toJSON(),
+        connId: conn.connId,
         tags: args.tags,
         bytesInTotal: 0,
         bytesOutTotal: 0
