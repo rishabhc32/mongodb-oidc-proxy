@@ -610,7 +610,7 @@ export interface SaslCommandInfo {
   db?: string;
 }
 
-export function getSaslCommand (msg: FullMessage): SaslCommandInfo {
+export function getSaslCommand(msg: FullMessage): SaslCommandInfo {
   if (msg.contents.opCode !== 'OP_MSG') {
     return { type: null };
   }
@@ -645,7 +645,7 @@ export function getSaslCommand (msg: FullMessage): SaslCommandInfo {
   return { type: null };
 }
 
-export function getCommandDb (msg: FullMessage): string | null {
+export function getCommandDb(msg: FullMessage): string | null {
   if (msg.contents.opCode !== 'OP_MSG') {
     return null;
   }
@@ -659,7 +659,7 @@ export function getCommandDb (msg: FullMessage): string | null {
   return bodySection.body.data.$db || null;
 }
 
-export function getCommandBody (msg: FullMessage): Record<string, unknown> | null {
+export function getCommandBody(msg: FullMessage): Record<string, unknown> | null {
   if (msg.contents.opCode !== 'OP_MSG') {
     return null;
   }

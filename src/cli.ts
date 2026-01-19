@@ -1,5 +1,5 @@
 import { Proxy, ConnectionPair } from '@src/proxy';
-import { OIDCProxy, OIDCProxyConfig, OIDCConnection } from '@src/oidc';
+import { OIDCProxy, OIDCConnection } from '@src/oidc';
 import type { FullMessage } from '@src/parse';
 import { EJSON } from 'bson';
 
@@ -19,7 +19,7 @@ export interface ParsedArgs {
   positional: string[];
 }
 
-export function parseArgs (argv: string[]): ParsedArgs {
+export function parseArgs(argv: string[]): ParsedArgs {
   const args: ParsedArgs = {
     help: false,
     ndjson: false,
@@ -66,7 +66,7 @@ export function parseArgs (argv: string[]): ParsedArgs {
   return args;
 }
 
-export function parseAddress (str: string): { host: string; port: number } | { path: string } {
+export function parseAddress(str: string): { host: string; port: number } | { path: string } {
   if (str.startsWith('/') || str.includes('\\')) {
     return { path: str };
   }
@@ -77,7 +77,7 @@ export function parseAddress (str: string): { host: string; port: number } | { p
   return { host, port: +port };
 }
 
-function printUsage (): void {
+function printUsage(): void {
   console.log(`usage: mongodb-wp-proxy [options] <args>
 
 Transparent proxy mode (default):
@@ -100,20 +100,20 @@ Options:
 `);
 }
 
-function normalizeUser (user: OptionalUser): string | null {
+function normalizeUser(user: OptionalUser): string | null {
   return user ?? null;
 }
 
-function formatLogPrefix (connId: string, user?: OptionalUser, tags?: string[]): string {
+function formatLogPrefix(connId: string, user?: OptionalUser, tags?: string[]): string {
   const tagStr = tags && tags.length > 0 ? ` [${tags.join(',')}]` : '';
   return `[${connId}]${user ? ` [${user}]` : ''}${tagStr}`;
 }
 
-function utcnow (): string {
+function utcnow(): string {
   return new Date().toISOString();
 }
 
-async function runTransparentProxy (args: ParsedArgs): Promise<void> {
+async function runTransparentProxy(args: ParsedArgs): Promise<void> {
   const targetStr = args.positional[0];
   const localStr = args.positional[1];
 
@@ -221,7 +221,7 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
   }
 }
 
-async function runOIDCProxy (args: ParsedArgs): Promise<void> {
+async function runOIDCProxy(args: ParsedArgs): Promise<void> {
   if (!args.issuer || !args.clientId || !args.connectionString) {
     console.error('Error: --oidc-mode requires --issuer, --client-id, and --connection-string');
     printUsage();
@@ -259,7 +259,7 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
         addr,
         mode: 'oidc',
         tags: args.tags,
-        issuer: args.issuer,
+        issuer: args.issuer
       }));
     } else {
       console.log(`OIDC Proxy listening on ${addr.address}:${addr.port}`);
