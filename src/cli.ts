@@ -132,8 +132,8 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
         ev: 'newConnection',
         conn,
         tag: args.tag,
-        bytes_in_total: 0,
-        bytes_out_total: 0
+        bytesInTotal: 0,
+        bytesOutTotal: 0
       }));
     } else {
       console.log(`[${conn.connId} outgoing] New connection from ${conn.incoming}`);
@@ -147,8 +147,8 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
           conn,
           source,
           tag: args.tag,
-          bytes_in_total: conn.bytesIn,
-          bytes_out_total: conn.bytesOut
+          bytesInTotal: conn.bytesIn,
+          bytesOutTotal: conn.bytesOut
         }));
       } else {
         console.log(`[${conn.connId} ${source}] Connection closed`);
@@ -179,8 +179,8 @@ async function runTransparentProxy (args: ParsedArgs): Promise<void> {
           source,
           msg,
           tag: args.tag,
-          bytes_in_total: conn.bytesIn,
-          bytes_out_total: conn.bytesOut
+          bytesInTotal: conn.bytesIn,
+          bytesOutTotal: conn.bytesOut
         }));
       } else {
         console.log(`[${conn.connId} ${source}] Message received`);
@@ -285,8 +285,8 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
         ev: 'newConnection',
         conn: conn.toJSON(),
         tag: args.tag,
-        bytes_in_total: 0,
-        bytes_out_total: 0
+        bytesInTotal: 0,
+        bytesOutTotal: 0
       }));
     } else {
       console.log(`[${conn.connId}] New connection from ${conn.incoming}`);
@@ -299,8 +299,8 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
           ev: 'connectionClosed',
           connId: conn.connId,
           tag: args.tag,
-          bytes_in_total: conn.bytesIn,
-          bytes_out_total: conn.bytesOut
+          bytesInTotal: conn.bytesIn,
+          bytesOutTotal: conn.bytesOut
         }));
       } else {
         console.log(`[${conn.connId}] Connection closed (in: ${conn.bytesIn} bytes, out: ${conn.bytesOut} bytes)`);
@@ -396,8 +396,8 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
           request,
           response,
           tag: args.tag,
-          bytes_in_total: conn.bytesIn,
-          bytes_out_total: conn.bytesOut
+          bytesInTotal: conn.bytesIn,
+          bytesOutTotal: conn.bytesOut
         }));
       } else {
         console.log(`${formatLogPrefix(conn.connId, normalizedUser, args.tag)} Forwarded command: ${db}.${cmd}`);
@@ -414,8 +414,8 @@ async function runOIDCProxy (args: ParsedArgs): Promise<void> {
           user: normalizedUser,
           error,
           tag: args.tag,
-          bytes_in_total: conn.bytesIn,
-          bytes_out_total: conn.bytesOut
+          bytesInTotal: conn.bytesIn,
+          bytesOutTotal: conn.bytesOut
         }));
       } else {
         console.log(`${formatLogPrefix(conn.connId, normalizedUser, args.tag)} Command error: ${error}`);

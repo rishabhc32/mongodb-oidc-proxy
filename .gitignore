@@ -10,3 +10,5 @@ lib/
 .env
 .env.prod
 .env.sandbox
+logs.ndjson
+run-fluent-bit.sh
