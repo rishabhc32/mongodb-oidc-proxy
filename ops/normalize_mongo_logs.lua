@@ -15,10 +15,7 @@ function normalize(tag, ts, record)
   end
 
   -- Convert Fluent Bit timestamp (Unix epoch) to ClickHouse DateTime64 format
-  -- ts is a number like 1737335734.508, convert to "2026-01-20 01:55:34.508"
-  local sec = math.floor(ts)
-  local msec = math.floor((ts - sec) * 1000)
-  record["ts"] = os.date("!%Y-%m-%d %H:%M:%S", sec) .. string.format(".%03d", msec)
+  record["ts"] = os.date("!%Y-%m-%d %H:%M:%S", ts) .. string.format(".%03d", (ts % 1) * 1000)
 
   -- Copy full record to log field for flexible querying (before normalization)
   record["log"] = shallow_copy(record)
