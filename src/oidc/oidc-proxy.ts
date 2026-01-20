@@ -567,10 +567,10 @@ export class OIDCConnection extends EventEmitter {
       return;
     }
 
-    try {
-      const command = { ...body };
-      delete command.$db;
+    const command = { ...body };
+    delete command.$db;
 
+    try {
       // Use the dedicated user client
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
       const result = await this.userClient!.db(dbName).command(command as Document);
@@ -610,7 +610,7 @@ export class OIDCConnection extends EventEmitter {
         errorMessage
       );
       this.write(response);
-      this.emit('commandError', this.email, errorMessage, dbName, cmdName);
+      this.emit('commandError', this.email, errorMessage, dbName, cmdName, command);
     }
   }
 }

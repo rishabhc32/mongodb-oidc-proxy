@@ -621,12 +621,13 @@ describe('OIDCProxy', function() {
       const invalidCmd = buildOpMsg({ doesNotExist: 1, $db: 'admin' }, 2);
       client.write(invalidCmd);
 
-      const [user, error, dbName, cmdName] = await commandErrorPromise;
+      const [user, error, dbName, cmdName, request] = await commandErrorPromise;
       assert.strictEqual(user, 'test-user@example.com');
       assert.strictEqual(dbName, 'admin');
       assert.strictEqual(cmdName, 'doesNotExist');
       assert.strictEqual(typeof error, 'string');
       assert(error.length > 0);
+      assert.deepStrictEqual(request?.doesNotExist, 1);
 
       client.destroy();
       await proxy.stop();
