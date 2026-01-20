@@ -174,13 +174,18 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 
     conn.on('message', (source: string, msg: FullMessage) => {
       if (args.ndjson) {
+        const messageBytes = msg.header?.messageLength ?? 0;
+        const requestBytes = source === 'outgoing' ? messageBytes : 0;
+        const responseBytes = source === 'incoming' ? messageBytes : 0;
         console.log(EJSON.stringify({
           ts: utcnow(),
-          ev: 'message',
+          ev: 'commandForwarded',
           connId: conn.connId,
           source,
           msg,
           tags: args.tags,
+          requestBytes,
+          responseBytes,
           bytesInTotal: conn.bytesIn,
           bytesOutTotal: conn.bytesOut
         }));
@@ -385,7 +390,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
       }
     });
 
-    conn.on('commandForwarded', (user: string, db: string, cmd: string, request: any, response: any) => {
+    conn.on('commandForwarded', (user: string, db: string, cmd: string, request: any, response: any, requestBytes = 0, responseBytes = 0) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
         console.log(EJSON.stringify({
@@ -398,6 +403,8 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
           request,
           response,
           tags: args.tags,
+          requestBytes,
+          responseBytes,
           bytesInTotal: conn.bytesIn,
           bytesOutTotal: conn.bytesOut
         }));

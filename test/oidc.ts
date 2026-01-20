@@ -1232,10 +1232,14 @@ describe('OIDCProxy with mock validator', function() {
       const findMsg = buildOpMsg({ find: 'test', $db: 'test' }, 2);
       client.write(findMsg);
 
-      const [user, dbName, cmdName] = await commandForwardedPromise;
+      const [user, dbName, cmdName, , , requestBytes, responseBytes] = await commandForwardedPromise;
       assert.strictEqual(user, 'test-user@example.com');
       assert.strictEqual(dbName, 'test');
       assert.strictEqual(cmdName, 'find');
+      assert.strictEqual(typeof requestBytes, 'number');
+      assert.strictEqual(typeof responseBytes, 'number');
+      assert(requestBytes > 0);
+      assert(responseBytes > 0);
 
       client.destroy();
       await proxy.stop();

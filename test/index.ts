@@ -111,6 +111,18 @@ describe('bin', function() {
   });
 
   describe('ndjson', () => {
+    const parseNdjsonLines = (output: string) =>
+      output
+        .split('\n')
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+
     beforeEach(async () => {
       proc = childProcess.spawn('ts-node', [
         '-P', path.join(__dirname, '..', 'tsconfig.json'),
@@ -159,6 +171,12 @@ describe('bin', function() {
     it('records find queries', async () => {
       await client.db('test').collection('test').findOne();
       assert.match(stdout, /"find":"test"/);
+      const events = parseNdjsonLines(stdout).filter((event) => event.ev === 'commandForwarded');
+      assert(events.length > 0, 'missing commandForwarded events');
+      const outgoing = events.find((event) => event.source === 'outgoing');
+      const incoming = events.find((event) => event.source === 'incoming');
+      assert(outgoing && outgoing.requestBytes > 0, 'missing outgoing requestBytes');
+      assert(incoming && incoming.responseBytes > 0, 'missing incoming responseBytes');
     });
   });
 });

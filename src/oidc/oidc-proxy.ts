@@ -580,7 +580,18 @@ export class OIDCConnection extends EventEmitter {
       );
       this.write(response);
 
-      this.emit('commandForwarded', this.email, dbName, Object.keys(command)[0], command, result);
+      const requestBytes = msg.header?.messageLength ?? 0;
+      const responseBytes = response.length;
+      this.emit(
+        'commandForwarded',
+        this.email,
+        dbName,
+        Object.keys(command)[0],
+        command,
+        result,
+        requestBytes,
+        responseBytes
+      );
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       const response = this.messageBuilder.buildErrorResponse(
