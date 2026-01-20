@@ -418,7 +418,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
       }
     });
 
-    conn.on('commandError', (user: string, error: string) => {
+    conn.on('commandError', (user: string, error: string, db?: string, cmd?: string) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
         console.log(JSON.stringify({
@@ -426,6 +426,8 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
           ev: 'commandError',
           connId: conn.connId,
           user: normalizedUser,
+          db,
+          cmd,
           error,
           tags: args.tags,
           bytesInTotal: conn.bytesIn,

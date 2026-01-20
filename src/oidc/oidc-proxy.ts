@@ -183,6 +183,13 @@ export class OIDCConnection extends EventEmitter {
     this.setupSocket(timeoutMs);
   }
 
+  private getCommandName(command?: Record<string, unknown> | null): string | null {
+    if (!command) {
+      return null;
+    }
+    return Object.keys(command).find((key) => !key.startsWith('$')) ?? null;
+  }
+
   private setupSocket(timeoutMs: number): void {
     // Set idle timeout
     this.socket.setTimeout(timeoutMs, () => {
@@ -269,7 +276,7 @@ export class OIDCConnection extends EventEmitter {
     // For non-auth commands, check if authenticated
     if (!this.authenticated) {
       const body = getCommandBody(msg);
-      const cmdName = body ? Object.keys(body).find(k => !k.startsWith('$')) : null;
+      const cmdName = this.getCommandName(body);
 
       // Allow hello/ismaster without auth for driver handshake
       if (body && (body.hello || body.ismaster || body.isMaster)) {
@@ -541,6 +548,7 @@ export class OIDCConnection extends EventEmitter {
   private async forwardCommand(msg: FullMessage): Promise<void> {
     const dbName = getCommandDb(msg) || 'admin';
     const body = getCommandBody(msg);
+    const cmdName = this.getCommandName(body);
 
     if (!body) {
       const response = this.messageBuilder.buildErrorResponse(
@@ -555,7 +563,6 @@ export class OIDCConnection extends EventEmitter {
     // This allows compliant drivers to reauthenticate without dropping the connection
     const tokenExp = this.tokenExp;
     if (tokenExp && Math.floor(Date.now() / 1000) >= tokenExp) {
-      const cmdName = Object.keys(body).find(k => !k.startsWith('$')) || 'unknown';
       this.sendReauthRequired(msg.header.requestID, `command ${cmdName} - token expired`);
       return;
     }
@@ -590,7 +597,7 @@ export class OIDCConnection extends EventEmitter {
         'commandForwarded',
         this.email,
         dbName,
-        Object.keys(command)[0],
+        cmdName,
         command,
         result,
         requestBytes,
@@ -603,7 +610,7 @@ export class OIDCConnection extends EventEmitter {
         errorMessage
       );
       this.write(response);
-      this.emit('commandError', this.email, errorMessage);
+      this.emit('commandError', this.email, errorMessage, dbName, cmdName);
     }
   }
 }
