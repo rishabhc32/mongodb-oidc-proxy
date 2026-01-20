@@ -14,15 +14,13 @@ function normalize(tag, ts, record)
     return -1, 0, 0
   end
 
-  -- Convert Fluent Bit timestamp (Unix epoch) to ClickHouse DateTime64 format
-  record["ts"] = os.date("!%Y-%m-%d %H:%M:%S", ts) .. string.format(".%03d", (ts % 1) * 1000)
+  -- Provide Elasticsearch-compatible @timestamp
+  local millis = math.floor((ts % 1) * 1000)
+  record["@timestamp"] = os.date("!%Y-%m-%dT%H:%M:%S", ts) .. string.format(".%03dZ", millis)
 
-  -- Copy full record to log field for flexible querying (before normalization)
-  record["log"] = shallow_copy(record)
-
-  -- Ensure tags array is not empty (empty Lua table {} serializes as JSON object, not array)
-  if record["tags"] == nil or #record["tags"] == 0 then
-    record["tags"] = { "" }
+  -- Drop tags when missing/empty to avoid placeholder values
+  if record["tags"] ~= nil and #record["tags"] == 0 then
+    record["tags"] = nil
   end
 
   record["connId"] = empty_if_missing(record["connId"])

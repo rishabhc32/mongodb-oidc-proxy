@@ -1,0 +1,16 @@
+{
+  "index_patterns": ["mongo-logs*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "request": {
+          "type": "flattened"
+        },
+        "response": {
+          "type": "flattened"
+        }
+      }
+    }
+  },
+  "priority": 100
+}
