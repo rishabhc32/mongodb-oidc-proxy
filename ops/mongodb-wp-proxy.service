@@ -1,0 +1,25 @@
+[Unit]
+Description=MongoDB Wire Protocol Proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/mongodb-wp-proxy
+EnvironmentFile=/etc/mongodb-wp-proxy/.env
+ExecStart=/usr/bin/node bin/mongodb-wp-proxy.js --ndjson --oidc-mode \
+  --issuer "${OIDC_ISSUER}" \
+  --client-id "${OIDC_CLIENT_ID}" \
+  --jwks-uri "${OIDC_JWKS_URI}" \
+  --connection-string "${MONGO_CONNECTION_STRING}" \
+  ${LISTEN_PORT}
+
+# stdout + stderr go to a dedicated journal namespace
+StandardOutput=journal
+StandardError=journal
+LogNamespace=mongodb-wp-proxy
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

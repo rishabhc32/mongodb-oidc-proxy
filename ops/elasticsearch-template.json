@@ -1,6 +1,10 @@
 {
-  "index_patterns": ["mongo-logs*"],
+  "index_patterns": ["mongo-logs-*"],
   "template": {
+    "settings": {
+      "index.lifecycle.name": "mongo-logs-ilm-policy",
+      "index.lifecycle.rollover_alias": "mongo-logs"
+    },
     "mappings": {
       "properties": {
         "request": {

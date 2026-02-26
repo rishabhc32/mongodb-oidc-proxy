@@ -10,5 +10,5 @@ lib/
 .env
 .env.prod
 .env.sandbox
+ops/.env.prod
 logs.ndjson
-run-fluent-bit.sh

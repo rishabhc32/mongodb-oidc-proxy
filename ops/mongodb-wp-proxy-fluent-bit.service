@@ -1,0 +1,15 @@
+[Unit]
+Description=Fluent Bit log shipper for MongoDB WP Proxy
+After=mongodb-wp-proxy.service
+BindsTo=mongodb-wp-proxy.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/mongodb-wp-proxy/.env
+ExecStart=/usr/bin/fluent-bit -c /etc/mongodb-wp-proxy/ops/fluent-bit.conf
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
