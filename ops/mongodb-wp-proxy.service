@@ -14,7 +14,7 @@ ExecStart=/usr/bin/node bin/mongodb-wp-proxy.js --ndjson --oidc-mode \
   --jwks-uri "${OIDC_JWKS_URI}" \
   --connection-string "${MONGO_CONNECTION_STRING}" \
   --log-file "${LOG_FILE}" \
-  ${LISTEN_PORT}
+  ${LISTEN_HOST}:${LISTEN_PORT}
 
 Restart=on-failure
 RestartSec=5
