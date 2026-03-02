@@ -63,7 +63,6 @@
     "eslint-plugin-standard": "^4.0.1",
     "gen-esm-wrapper": "^1.1.0",
     "mocha": "^11.7.5",
-    "mongodb": "^6.19.0",
     "mongodb-runner": "^5.9.2",
     "nyc": "^15.1.0",
     "sinon": "^17.0.1",

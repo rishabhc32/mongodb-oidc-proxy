@@ -1,2 +1,2 @@
 #!/usr/bin/env node
-require('../lib/cli');
+require('../lib/cli').main().catch((err) => process.nextTick(() => { throw err; }));

@@ -548,19 +548,21 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
   await proxy.start();
 }
 
+export async function main (): Promise<void> {
+  const args = parseArgs(process.argv);
+
+  if (args.help || (args.positional.length === 0 && !args.oidcMode)) {
+    printUsage();
+    return;
+  }
+
+  if (args.oidcMode) {
+    await runOIDCProxy(args);
+  } else {
+    await runTransparentProxy(args);
+  }
+}
+
 if (require.main === module) {
-  (async () => {
-    const args = parseArgs(process.argv);
-
-    if (args.help || (args.positional.length === 0 && !args.oidcMode)) {
-      printUsage();
-      return;
-    }
-
-    if (args.oidcMode) {
-      await runOIDCProxy(args);
-    } else {
-      await runTransparentProxy(args);
-    }
-  })().catch((err: Error) => process.nextTick(() => { throw err; }));
+  main().catch((err: Error) => process.nextTick(() => { throw err; }));
 }
