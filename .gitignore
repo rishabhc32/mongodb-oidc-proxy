@@ -12,3 +12,4 @@ lib/
 .env.sandbox
 ops/.env.prod
 logs.ndjson
+deploy.sh

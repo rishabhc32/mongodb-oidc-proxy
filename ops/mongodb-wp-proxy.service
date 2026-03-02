@@ -4,6 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=mongodb-wp-proxy
+Group=mongodb-wp-proxy
 WorkingDirectory=/etc/mongodb-wp-proxy
 EnvironmentFile=/etc/mongodb-wp-proxy/.env
 ExecStart=/usr/bin/node bin/mongodb-wp-proxy.js --ndjson --oidc-mode \

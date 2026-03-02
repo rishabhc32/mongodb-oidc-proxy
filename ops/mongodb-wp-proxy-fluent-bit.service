@@ -5,8 +5,10 @@ BindsTo=mongodb-wp-proxy.service
 
 [Service]
 Type=simple
+User=mongodb-wp-proxy
+Group=mongodb-wp-proxy
 EnvironmentFile=/etc/mongodb-wp-proxy/.env
-ExecStart=/usr/bin/fluent-bit -c /etc/mongodb-wp-proxy/ops/fluent-bit.conf
+ExecStart=/opt/fluent-bit/bin/fluent-bit -c /etc/mongodb-wp-proxy/ops/fluent-bit.conf
 
 Restart=on-failure
 RestartSec=5
