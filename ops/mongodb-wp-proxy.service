@@ -11,12 +11,8 @@ ExecStart=/usr/bin/node bin/mongodb-wp-proxy.js --ndjson --oidc-mode \
   --client-id "${OIDC_CLIENT_ID}" \
   --jwks-uri "${OIDC_JWKS_URI}" \
   --connection-string "${MONGO_CONNECTION_STRING}" \
+  --log-file "${LOG_FILE}" \
   ${LISTEN_PORT}
-
-# stdout + stderr go to a dedicated journal namespace
-StandardOutput=journal
-StandardError=journal
-LogNamespace=mongodb-wp-proxy
 
 Restart=on-failure
 RestartSec=5

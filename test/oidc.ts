@@ -52,7 +52,7 @@ class ResponseReader {
 
   constructor(client: net.Socket) {
     client.on('data', (chunk) => {
-      this.buffer = Buffer.concat([this.buffer, chunk]);
+      this.buffer = Buffer.concat([this.buffer, chunk as Buffer]);
       this.processBuffer();
     });
   }
