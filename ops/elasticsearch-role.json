@@ -1,0 +1,23 @@
+{
+  "mongo_proxy_role": {
+    "cluster": [],
+    "indices": [
+      {
+        "names": [
+          "mongo-logs",
+          "mongo-logs-*"
+        ],
+        "privileges": [
+          "all"
+        ],
+        "allow_restricted_indices": false
+      }
+    ],
+    "applications": [],
+    "run_as": [],
+    "metadata": {},
+    "transient_metadata": {
+      "enabled": true
+    }
+  }
+}
