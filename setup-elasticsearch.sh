@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ES_URL="http://${ES_HOST}:${ES_PORT}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ES_URL="https://${ES_HOST}:${ES_PORT}"
+SCRIPT_DIR="$(cd "$(dirname "$0")/ops" && pwd)"
+
+AUTH=()
+read -rp "Elasticsearch username (leave empty to skip auth): " ES_USER
+if [[ -n "$ES_USER" ]]; then
+  read -rsp "Elasticsearch password: " ES_PASS
+  echo
+  AUTH=(-u "${ES_USER}:${ES_PASS}")
+fi
 
 echo "==> Creating ILM policy..."
-curl -s -X PUT "${ES_URL}/_ilm/policy/mongo-logs-ilm-policy" \
+curl -sSk -X PUT "${ES_URL}/_ilm/policy/mongo-logs-ilm-policy" \
+  "${AUTH[@]}" \
   -H "Content-Type: application/json" \
   -d @"${SCRIPT_DIR}/elasticsearch-ilm-policy.json"
 echo
 
 echo "==> Creating index template..."
-curl -s -X PUT "${ES_URL}/_index_template/mongo-logs-template" \
+curl -sSk -X PUT "${ES_URL}/_index_template/mongo-logs-template" \
+  "${AUTH[@]}" \
   -H "Content-Type: application/json" \
   -d @"${SCRIPT_DIR}/elasticsearch-template.json"
 echo
 
 echo "==> Creating initial index with write alias..."
-curl -s -X PUT "${ES_URL}/mongo-logs-proxy-000001" \
+curl -sSk -X PUT "${ES_URL}/mongo-logs-proxy-000001" \
+  "${AUTH[@]}" \
   -H "Content-Type: application/json" \
   -d '{
     "aliases": {
