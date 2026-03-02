@@ -103,6 +103,16 @@ describe('cli parseArgs', () => {
     assert.deepStrictEqual(args.positional, ['3000']);
   });
 
+  it('parses --log-file', () => {
+    const args = parseArgs(['node', 'cli.ts', '--log-file', '/var/log/proxy.log']);
+    assert.strictEqual(args.logFile, '/var/log/proxy.log');
+  });
+
+  it('handles missing value for --log-file at end', () => {
+    const args = parseArgs(['node', 'cli.ts', '--log-file']);
+    assert.strictEqual(args.logFile, undefined);
+  });
+
   it('ignores unknown flags starting with --', () => {
     const args = parseArgs(['node', 'cli.ts', '--unknown-flag', 'value']);
     assert.strictEqual((args as any).unknownFlag, undefined);
@@ -125,6 +135,7 @@ describe('cli parseArgs', () => {
     assert.strictEqual(args.connectionString, undefined);
     assert.strictEqual(args.jwksUri, undefined);
     assert.strictEqual(args.audience, undefined);
+    assert.strictEqual(args.logFile, undefined);
     assert.deepStrictEqual(args.tags, []);
     assert.deepStrictEqual(args.positional, []);
   });

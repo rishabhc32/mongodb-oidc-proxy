@@ -2,6 +2,7 @@ import { Proxy, ConnectionPair } from '@src/proxy';
 import { OIDCProxy, OIDCConnection } from '@src/oidc';
 import type { FullMessage } from '@src/parse';
 import { EJSON } from 'bson';
+import winston from 'winston';
 
 type OptionalUser = string | null | undefined;
 
@@ -16,6 +17,7 @@ export interface ParsedArgs {
   connectionString?: string;
   jwksUri?: string;
   audience?: string;
+  logFile?: string;
   positional: string[];
 }
 
@@ -56,6 +58,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.jwksUri = argv[++i];
     } else if (arg === '--audience' && i + 1 < argv.length) {
       args.audience = argv[++i];
+    } else if (arg === '--log-file' && i + 1 < argv.length) {
+      args.logFile = argv[++i];
     } else if (!arg.startsWith('--')) {
       args.positional.push(arg);
     }
@@ -97,6 +101,7 @@ Options:
   --connection-string <uri>  Backend MongoDB connection string (required for OIDC mode)
   --jwks-uri <url>      Custom JWKS endpoint (optional, defaults to issuer/.well-known/jwks.json)
   --audience <aud>      Expected JWT audience claim (optional)
+  --log-file <path>     Write NDJSON logs to a rotating file instead of stdout
 `);
 }
 
@@ -113,6 +118,25 @@ function utcnow(): string {
   return new Date().toISOString();
 }
 
+function createWriteLog(logFile?: string): (json: string) => void {
+  if (!logFile) {
+    return (json: string) => console.log(json);
+  }
+  const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.printf(({ message }) => message as string),
+    transports: [
+      new winston.transports.File({
+        filename: logFile,
+        maxsize: 50 * 1024 * 1024, // 50MB
+        maxFiles: 100,
+        tailable: true
+      })
+    ]
+  });
+  return (json: string) => logger.info(json);
+}
+
 async function runTransparentProxy(args: ParsedArgs): Promise<void> {
   const targetStr = args.positional[0];
   const localStr = args.positional[1];
@@ -124,12 +148,13 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 
   const target = parseAddress(targetStr);
   const local = parseAddress(localStr);
+  const writeLog = createWriteLog(args.logFile);
 
   const proxy = new Proxy(target);
 
   proxy.on('newConnection', (conn: ConnectionPair) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({
+      writeLog(JSON.stringify({
         ts: utcnow(),
         ev: 'newConnection',
         connId: conn.connId,
@@ -143,7 +168,7 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 
     conn.on('connectionClosed', (source: string) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'connectionClosed',
           connId: conn.connId,
@@ -159,7 +184,7 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 
     conn.on('connectionError', (source: string, err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'connectionError',
           connId: conn.connId,
@@ -177,7 +202,7 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
         const messageBytes = msg.header?.messageLength ?? 0;
         const requestBytes = source === 'outgoing' ? messageBytes : 0;
         const responseBytes = source === 'incoming' ? messageBytes : 0;
-        console.log(EJSON.stringify({
+        writeLog(EJSON.stringify({
           ts: utcnow(),
           ev: 'commandForwarded',
           connId: conn.connId,
@@ -197,7 +222,7 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 
     conn.on('parseError', (source: string, err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'parseError',
           connId: conn.connId,
@@ -213,7 +238,7 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 
   await proxy.listen(local);
   if (args.ndjson) {
-    console.log(JSON.stringify({
+    writeLog(JSON.stringify({
       ts: utcnow(),
       ev: 'listening',
       addr: proxy.address(),
@@ -246,6 +271,8 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     process.exit(1);
   }
 
+  const writeLog = createWriteLog(args.logFile);
+
   const proxy = new OIDCProxy({
     issuer: args.issuer,
     clientId: args.clientId,
@@ -258,7 +285,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
 
   proxy.on('listening', (addr) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({
+      writeLog(JSON.stringify({
         ts: utcnow(),
         ev: 'listening',
         addr,
@@ -275,7 +302,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
 
   proxy.on('backendConnected', () => {
     if (args.ndjson) {
-      console.log(JSON.stringify({
+      writeLog(JSON.stringify({
         ts: utcnow(),
         ev: 'backendConnected',
         tags: args.tags
@@ -287,7 +314,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
 
   proxy.on('newConnection', (conn: OIDCConnection) => {
     if (args.ndjson) {
-      console.log(JSON.stringify({
+      writeLog(JSON.stringify({
         ts: utcnow(),
         ev: 'newConnection',
         connId: conn.connId,
@@ -302,7 +329,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     conn.on('connectionClosed', () => {
       const normalizedUser = normalizeUser(conn.getUser());
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'connectionClosed',
           connId: conn.connId,
@@ -318,7 +345,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
 
     conn.on('connectionError', (err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'connectionError',
           connId: conn.connId,
@@ -332,7 +359,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
 
     conn.on('saslStart', () => {
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'saslStart',
           tags: args.tags,
@@ -346,7 +373,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     conn.on('authAttempt', (user: OptionalUser, jwt: Record<string, unknown> | null) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'authAttempt',
           tags: args.tags,
@@ -363,7 +390,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
       const normalizedUser = normalizeUser(user);
       const normalizedSubject = normalizeUser(subject);
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'authSuccess',
           tags: args.tags,
@@ -379,7 +406,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     conn.on('authFailed', (user: OptionalUser, error: string) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'authFailed',
           tags: args.tags,
@@ -412,7 +439,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
         if (args.logLevel === 'debug') {
           payload.response = response;
         }
-        console.log(EJSON.stringify(payload));
+        writeLog(EJSON.stringify(payload));
       } else {
         console.log(`${formatLogPrefix(conn.connId, normalizedUser, args.tags)} Forwarded command: ${db}.${cmd}`);
       }
@@ -421,7 +448,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     conn.on('commandError', (user: string, error: string, db?: string, cmd?: string, request?: any) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(EJSON.stringify({
+        writeLog(EJSON.stringify({
           ts: utcnow(),
           ev: 'commandError',
           connId: conn.connId,
@@ -441,7 +468,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
 
     conn.on('parseError', (err: Error) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'parseError',
           connId: conn.connId,
@@ -455,7 +482,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
 
     conn.on('authRequired', (cmdName: string | null) => {
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'authRequired',
           tags: args.tags,
@@ -473,7 +500,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
       }
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'debug',
           tags: args.tags,
@@ -489,7 +516,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     conn.on('connectionTimeout', () => {
       const normalizedUser = normalizeUser(conn.getUser());
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'connectionTimeout',
           tags: args.tags,
@@ -504,7 +531,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     conn.on('reauthRequired', (user: OptionalUser, reason: string) => {
       const normalizedUser = normalizeUser(user);
       if (args.ndjson) {
-        console.log(JSON.stringify({
+        writeLog(JSON.stringify({
           ts: utcnow(),
           ev: 'reauthRequired',
           tags: args.tags,

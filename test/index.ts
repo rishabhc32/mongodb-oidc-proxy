@@ -4,6 +4,8 @@ import { MongoClient } from 'mongodb';
 import childProcess from 'child_process';
 import { EJSON } from 'bson';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 import { once } from 'events';
 
 let hostport: string;
@@ -107,6 +109,74 @@ describe('bin', function() {
     it('records find queries', async () => {
       await client.db('test').collection('test').findOne();
       assert.match(stdout, /find: 'test'/);
+    });
+  });
+
+  describe('ndjson --log-file', () => {
+    let logFile: string;
+    let tmpDir: fs.DisposableTempDir;
+
+    const parseNdjsonLines = (output: string) =>
+      output
+        .split('\n')
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+
+    const waitForLogEvent = async (filePath: string, evName: string) => {
+      for await (const _ of fs.promises.watch(path.dirname(filePath))) {
+        try {
+          const content = fs.readFileSync(filePath, 'utf8');
+          const event = parseNdjsonLines(content).find((e) => e.ev === evName);
+          if (event) return event;
+        } catch {}
+      }
+    };
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempDisposableSync(path.join(os.tmpdir(), 'proxy-test-'));
+      logFile = path.join(tmpDir.path, 'proxy.log');
+      proc = childProcess.spawn('ts-node', [
+        '-P', path.join(__dirname, '..', 'tsconfig.json'),
+        '-r', 'tsconfig-paths/register',
+        path.join(__dirname, '..', 'src', 'cli.ts'),
+        '--ndjson',
+        '--log-file', logFile,
+        hostport, 'localhost:0'
+      ], { stdio: 'pipe' });
+      stdout = '';
+      (proc.stdout as any).setEncoding('utf8');
+      (proc.stdout as any).on('data', (chunk: string) => { stdout += chunk; });
+      // Wait for listening event to appear in the log file
+      const listening = await waitForLogEvent(logFile, 'listening');
+      port = listening.addr.port;
+      client = await MongoClient.connect(`mongodb://localhost:${port}`);
+    });
+
+    afterEach(async () => {
+      await client.close();
+      proc.kill();
+      await once(proc, 'exit');
+      tmpDir[Symbol.dispose]();
+    });
+
+    it('writes ndjson events to log file', async () => {
+      await client.db('test').collection('test').findOne();
+      const content = fs.readFileSync(logFile, 'utf8');
+      const events = parseNdjsonLines(content);
+      assert(events.some((e) => e.ev === 'listening'), 'log file should contain listening event');
+      assert(events.some((e) => e.ev === 'commandForwarded'), 'log file should contain commandForwarded events');
+    });
+
+    it('does not write ndjson to stdout when --log-file is used', async () => {
+      await client.db('test').collection('test').findOne();
+      const ndjsonLines = parseNdjsonLines(stdout);
+      assert.strictEqual(ndjsonLines.length, 0, 'stdout should not contain NDJSON when --log-file is used');
     });
   });
 

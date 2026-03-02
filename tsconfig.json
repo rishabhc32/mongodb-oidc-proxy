@@ -1,4 +1,7 @@
 {
+  "ts-node": {
+    "esm": false
+  },
   "compilerOptions": {
     "esModuleInterop": true,
     "downlevelIteration": true,
@@ -11,8 +14,8 @@
 
     "declaration": true,
     "removeComments": true,
-    "target": "es2018",
-    "lib": ["es2019"],
+    "target": "es2022",
+    "lib": ["es2024", "esnext.disposable"],
     "module": "commonjs",
     "moduleResolution": "node",
     "outDir": "./lib",
