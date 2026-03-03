@@ -98,7 +98,7 @@ Options:
   --oidc-mode           Enable OIDC authentication termination mode
   --issuer <url>        OIDC issuer URL (required for OIDC mode)
   --client-id <id>      OAuth client ID to return to clients (required for OIDC mode)
-  --connection-string <uri>  Backend MongoDB connection string (required for OIDC mode)
+  --connection-string <uri>  Backend MongoDB connection string (or MONGO_CONNECTION_STRING env)
   --jwks-uri <url>      Custom JWKS endpoint (optional, defaults to issuer/.well-known/jwks.json)
   --audience <aud>      Expected JWT audience claim (optional)
   --log-file <path>     Write NDJSON logs to a rotating file instead of stdout
@@ -252,8 +252,10 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 }
 
 async function runOIDCProxy(args: ParsedArgs): Promise<void> {
+  args.connectionString ??= process.env.MONGO_CONNECTION_STRING;
+
   if (!args.issuer || !args.clientId || !args.connectionString) {
-    console.error('Error: --oidc-mode requires --issuer, --client-id, and --connection-string');
+    console.error('Error: --oidc-mode requires --issuer, --client-id, and --connection-string (or MONGO_CONNECTION_STRING env)');
     printUsage();
     process.exit(1);
   }
@@ -548,7 +550,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
   await proxy.start();
 }
 
-export async function main (): Promise<void> {
+export async function main(): Promise<void> {
   const args = parseArgs(process.argv);
 
   if (args.help || (args.positional.length === 0 && !args.oidcMode)) {

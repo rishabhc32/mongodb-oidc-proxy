@@ -12,7 +12,6 @@ ExecStart=/usr/bin/node bin/mongodb-wp-proxy.js --ndjson --oidc-mode \
   --issuer "${OIDC_ISSUER}" \
   --client-id "${OIDC_CLIENT_ID}" \
   --jwks-uri "${OIDC_JWKS_URI}" \
-  --connection-string "${MONGO_CONNECTION_STRING}" \
   --log-file "${LOG_FILE}" \
   ${LISTEN_HOST}:${LISTEN_PORT}
 
