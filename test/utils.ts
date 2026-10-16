@@ -1,7 +1,7 @@
 import assert from 'assert';
 import { ksuid } from '@src/utils/ksuid';
 
-describe('ksuid', function() {
+describe('ksuid', function () {
   it('returns a 27-character string', () => {
     const id = ksuid();
     assert.strictEqual(id.length, 27);
@@ -23,7 +23,7 @@ describe('ksuid', function() {
 
   it('generates IDs that sort chronologically', async () => {
     const id1 = ksuid();
-    await new Promise(resolve => setTimeout(resolve, 1100)); // Wait for timestamp to change
+    await new Promise((resolve) => setTimeout(resolve, 1100)); // Wait for timestamp to change
     const id2 = ksuid();
     assert(id1 < id2, `Expected ${id1} < ${id2}`);
   });

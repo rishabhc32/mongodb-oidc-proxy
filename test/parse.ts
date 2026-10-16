@@ -82,7 +82,8 @@ describe('ParseMessage', () => {
     const body = Buffer.concat([Buffer.alloc(4), section, seqId, emptyDoc]);
     await assert.rejects(
       ParseMessage(Buffer.concat([header(16 + body.length, OpCode.OP_MSG), body])),
-      /Invalid BSON document size/);
+      /Invalid BSON document size/
+    );
   });
 
   describe('OP_COMPRESSED', () => {
@@ -135,14 +136,19 @@ describe('WireProtocolParser', () => {
     const messages: any[] = [];
     parser.on('message', (msg) => messages.push(msg));
     parser.write(Buffer.concat([opMsg({ a: 1 }), opMsg({ b: 1 })]));
-    await new Promise(resolve => setImmediate(resolve));
-    assert.deepStrictEqual(messages.map(m => Object.keys(m.contents.sections[0].body.data)[0]), ['a', 'b']);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepStrictEqual(
+      messages.map((m) => Object.keys(m.contents.sections[0].body.data)[0]),
+      ['a', 'b']
+    );
   });
 
   it('errors on an invalid message length instead of re-parsing it', async () => {
     const parser = new WireProtocolParser();
     let messages = 0;
-    parser.on('message', () => { messages++; });
+    parser.on('message', () => {
+      messages++;
+    });
     const errored = once(parser, 'error');
     parser.write(header(0, 9999));
     const [err] = await errored;

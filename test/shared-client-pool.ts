@@ -76,7 +76,10 @@ describe('SharedClientPool', () => {
     const create = sinon.stub().rejects(new Error('backend unavailable'));
 
     const results = await Promise.allSettled([pool.acquire('alice', create), pool.acquire('alice', create)]);
-    assert.deepStrictEqual(results.map(r => r.status), ['rejected', 'rejected']);
+    assert.deepStrictEqual(
+      results.map((r) => r.status),
+      ['rejected', 'rejected']
+    );
     assert.strictEqual(create.callCount, 1);
     assert.strictEqual(pool.connectionCount('alice'), 0);
 

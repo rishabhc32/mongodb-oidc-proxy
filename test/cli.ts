@@ -82,16 +82,24 @@ describe('cli parseArgs', () => {
 
   it('parses multiple flags together', () => {
     const args = parseArgs([
-      'node', 'cli.ts',
+      'node',
+      'cli.ts',
       '--ndjson',
       '--oidc-mode',
-      '--issuer', 'https://auth.example.com',
-      '--client-id', 'test-client',
-      '--connection-string', 'mongodb://localhost:27017',
-      '--jwks-uri', 'https://auth.example.com/jwks',
-      '--audience', 'https://api.example.com',
-      '--log-level', 'debug',
-      '--tag', 'alpha',
+      '--issuer',
+      'https://auth.example.com',
+      '--client-id',
+      'test-client',
+      '--connection-string',
+      'mongodb://localhost:27017',
+      '--jwks-uri',
+      'https://auth.example.com/jwks',
+      '--audience',
+      'https://api.example.com',
+      '--log-level',
+      'debug',
+      '--tag',
+      'alpha',
       '3000'
     ]);
     assert.strictEqual(args.ndjson, true);
@@ -197,7 +205,10 @@ describe('cli resolveConnectionString', () => {
   });
 
   it('reads the file named by MONGO_CONNECTION_STRING_FILE, trimming whitespace', () => {
-    assert.strictEqual(resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: secretFile }), 'mongodb://from-file:27017');
+    assert.strictEqual(
+      resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: secretFile }),
+      'mongodb://from-file:27017'
+    );
   });
 
   it('returns undefined when nothing is set', () => {
@@ -205,7 +216,10 @@ describe('cli resolveConnectionString', () => {
   });
 
   it('throws when the file cannot be read', () => {
-    assert.throws(() => resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: path.join(tmpDir, 'missing') }), /ENOENT/);
+    assert.throws(
+      () => resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: path.join(tmpDir, 'missing') }),
+      /ENOENT/
+    );
   });
 });
 

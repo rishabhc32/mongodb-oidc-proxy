@@ -50,7 +50,7 @@ export class SharedClientPool {
           if (this.entries.get(email) === acquired) {
             this.entries.delete(email);
           }
-          client.close().catch(() => { });
+          client.close().catch(() => {});
         }
       }
     };
@@ -62,7 +62,7 @@ export class SharedClientPool {
   }
 
   async closeAll(): Promise<void> {
-    const closing = [...this.entries.values()].map(entry => entry.client.then(client => client.close()));
+    const closing = [...this.entries.values()].map((entry) => entry.client.then((client) => client.close()));
     this.entries.clear();
     await Promise.allSettled(closing);
   }

@@ -43,7 +43,7 @@ class MessageHeader {
     this.opCode = values.opCode;
   }
 
-  static async Read(buf: Uint8Array): Promise<{ msg: MessageHeader, readBytes: number }> {
+  static async Read(buf: Uint8Array): Promise<{ msg: MessageHeader; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, 4 * 4);
     return {
       msg: new this({
@@ -68,7 +68,7 @@ class OpCode {
   static OP_KILL_CURSORS = 2007;
   static OP_COMPRESSED = 2012;
 
-  static LookupOpCode(value: typeof OpCode[keyof OpCode]): keyof OpCode | null {
+  static LookupOpCode(value: (typeof OpCode)[keyof OpCode]): keyof OpCode | null {
     for (const key of Object.keys(OpCode) as (keyof OpCode)[]) {
       if (OpCode[key] === value) {
         return key;
@@ -78,7 +78,8 @@ class OpCode {
   }
 }
 
-type OpContents = OpMsg | OpReply | OpUpdate | OpInsert | OpQuery | OpGetMore | OpDelete | OpKillCursors | OpCompressed | OpUnknown;
+type OpContents =
+  OpMsg | OpReply | OpUpdate | OpInsert | OpQuery | OpGetMore | OpDelete | OpKillCursors | OpCompressed | OpUnknown;
 
 class BSONBuffer {
   data: any;
@@ -87,8 +88,10 @@ class BSONBuffer {
   constructor(buf: Uint8Array) {
     this.data = deserialize(buf);
     let payload: undefined | Binary;
-    if ((this.data.saslStart || this.data.saslContinue || this.data.conversationId) &&
-      this.data.payload?._bsontype === 'Binary') {
+    if (
+      (this.data.saslStart || this.data.saslContinue || this.data.conversationId) &&
+      this.data.payload?._bsontype === 'Binary'
+    ) {
       payload = this.data.payload;
     }
     if (this.data.speculativeAuthenticate?.payload?._bsontype === 'Binary') {
@@ -98,8 +101,7 @@ class BSONBuffer {
       if (payload) {
         this.decodedPayload = deserialize(payload.value());
       }
-    } catch (err) {
-    }
+    } catch (err) {}
   }
 }
 
@@ -153,45 +155,47 @@ class OpMsg {
     this.checksum = values.checksum;
   }
 
-  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpMsg, readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpMsg; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     const flagBits = dv.getUint32(0, true);
-    const checksum = (flagBits & 1) ? dv.getUint32(length - 4, true) : null;
+    const checksum = flagBits & 1 ? dv.getUint32(length - 4, true) : null;
     const sections: OpMsg['sections'] = [];
     let i: number;
-    for (i = 4; i < ((flagBits & 1) ? length - 4 : length);) {
+    for (i = 4; i < (flagBits & 1 ? length - 4 : length);) {
       const kind = dv.getUint8(i);
       switch (kind) {
-        case 0: {
-          const bsonSize = dv.getUint32(i + 1, true);
-          sections.push(new OpMsgBodySection(
-            new BSONBuffer(bsonView(buf, length, i + 1, bsonSize))));
-          i += 1 + bsonSize;
-        }
-          break;
-        case 1: {
-          const sectionSize = dv.getUint32(i + 1, true);
-          const seqIdStart = i + 5;
-          for (i = seqIdStart; i < seqIdStart - 4 + sectionSize; i++) {
-            if (dv.getUint8(i) === 0) { break; }
+        case 0:
+          {
+            const bsonSize = dv.getUint32(i + 1, true);
+            sections.push(new OpMsgBodySection(new BSONBuffer(bsonView(buf, length, i + 1, bsonSize))));
+            i += 1 + bsonSize;
           }
-          const docSequenceId = new TextDecoder().decode(
-            view(buf, length, seqIdStart, i - 1 - seqIdStart));
-          const objects: BSONBuffer[] = [];
-          for (i = i + 1; i < seqIdStart - 4 + sectionSize;) {
-            const bsonSize = dv.getUint32(i, true);
-            objects.push(new BSONBuffer(bsonView(buf, length, i, bsonSize)));
-            i += bsonSize;
-          }
-          sections.push(new OpMsgDocumentSequenceSection(docSequenceId, objects));
-        }
           break;
-        case 2: {
-          const bsonSize = dv.getUint32(i + 1, true);
-          sections.push(new OpMsgSecurityTokenSection(
-            new BSONBuffer(bsonView(buf, length, i + 1, bsonSize))));
-          i += 1 + bsonSize;
-        }
+        case 1:
+          {
+            const sectionSize = dv.getUint32(i + 1, true);
+            const seqIdStart = i + 5;
+            for (i = seqIdStart; i < seqIdStart - 4 + sectionSize; i++) {
+              if (dv.getUint8(i) === 0) {
+                break;
+              }
+            }
+            const docSequenceId = new TextDecoder().decode(view(buf, length, seqIdStart, i - 1 - seqIdStart));
+            const objects: BSONBuffer[] = [];
+            for (i = i + 1; i < seqIdStart - 4 + sectionSize;) {
+              const bsonSize = dv.getUint32(i, true);
+              objects.push(new BSONBuffer(bsonView(buf, length, i, bsonSize)));
+              i += bsonSize;
+            }
+            sections.push(new OpMsgDocumentSequenceSection(docSequenceId, objects));
+          }
+          break;
+        case 2:
+          {
+            const bsonSize = dv.getUint32(i + 1, true);
+            sections.push(new OpMsgSecurityTokenSection(new BSONBuffer(bsonView(buf, length, i + 1, bsonSize))));
+            i += 1 + bsonSize;
+          }
           break;
         default: {
           sections.push(new OpMsgUnknownSection(kind));
@@ -226,14 +230,15 @@ class OpUpdate {
     this.update = values.update;
   }
 
-  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpUpdate, readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpUpdate; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     let i;
     for (i = 4; i < length; i++) {
-      if (dv.getUint8(i) === 0) { break; }
+      if (dv.getUint8(i) === 0) {
+        break;
+      }
     }
-    const fullCollectionName = new TextDecoder().decode(
-      view(buf, length, 4, i - 4));
+    const fullCollectionName = new TextDecoder().decode(view(buf, length, 4, i - 4));
     i++;
     const flags = dv.getInt32(i, true);
     let selector: BSONBuffer;
@@ -273,15 +278,16 @@ class OpInsert {
     this.documents = values.documents;
   }
 
-  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpInsert, readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpInsert; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     let i = 0;
     const flags = dv.getInt32(i, true);
     for (i = 4; i < length; i++) {
-      if (dv.getUint8(i) === 0) { break; }
+      if (dv.getUint8(i) === 0) {
+        break;
+      }
     }
-    const fullCollectionName = new TextDecoder().decode(
-      view(buf, length, 4, i - 4));
+    const fullCollectionName = new TextDecoder().decode(view(buf, length, 4, i - 4));
     i++;
     const documents: BSONBuffer[] = [];
     while (i < length) {
@@ -310,7 +316,12 @@ class OpQuery {
   query: BSONBuffer;
   returnFieldsSelector: BSONBuffer | null;
 
-  constructor(values: Pick<OpQuery, 'fullCollectionName' | 'flags' | 'numberToSkip' | 'numberToReturn' | 'query' | 'returnFieldsSelector'>) {
+  constructor(
+    values: Pick<
+      OpQuery,
+      'fullCollectionName' | 'flags' | 'numberToSkip' | 'numberToReturn' | 'query' | 'returnFieldsSelector'
+    >
+  ) {
     this.fullCollectionName = values.fullCollectionName;
     this.flags = values.flags;
     this.numberToSkip = values.numberToSkip;
@@ -319,15 +330,16 @@ class OpQuery {
     this.returnFieldsSelector = values.returnFieldsSelector;
   }
 
-  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpQuery, readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpQuery; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     let i = 0;
     const flags = dv.getInt32(i, true);
     for (i = 4; i < length; i++) {
-      if (dv.getUint8(i) === 0) { break; }
+      if (dv.getUint8(i) === 0) {
+        break;
+      }
     }
-    const fullCollectionName = new TextDecoder().decode(
-      view(buf, length, 4, i - 4));
+    const fullCollectionName = new TextDecoder().decode(view(buf, length, 4, i - 4));
     i++;
 
     const numberToSkip = dv.getInt32(i, true);
@@ -374,14 +386,15 @@ class OpGetMore {
     this.cursorId = values.cursorId;
   }
 
-  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpGetMore, readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpGetMore; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     let i;
     for (i = 4; i < length; i++) {
-      if (dv.getUint8(i) === 0) { break; }
+      if (dv.getUint8(i) === 0) {
+        break;
+      }
     }
-    const fullCollectionName = new TextDecoder().decode(
-      view(buf, length, 4, i - 4));
+    const fullCollectionName = new TextDecoder().decode(view(buf, length, 4, i - 4));
     i++;
 
     const numberToReturn = dv.getInt32(i, true);
@@ -412,14 +425,15 @@ class OpDelete {
     this.selector = values.selector;
   }
 
-  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpDelete, readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpDelete; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     let i;
     for (i = 4; i < length; i++) {
-      if (dv.getUint8(i) === 0) { break; }
+      if (dv.getUint8(i) === 0) {
+        break;
+      }
     }
-    const fullCollectionName = new TextDecoder().decode(
-      view(buf, length, 4, i - 4));
+    const fullCollectionName = new TextDecoder().decode(view(buf, length, 4, i - 4));
     i++;
 
     const flags = dv.getInt32(i, true);
@@ -451,12 +465,12 @@ class OpKillCursors {
     this.cursorIds = values.cursorIds;
   }
 
-  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpKillCursors, readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpKillCursors; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     const n = dv.getInt32(4, true);
     const cursorIds: string[] = [];
     let i;
-    for (i = 8; (i - 8) < n * 8; i += 8) {
+    for (i = 8; i - 8 < n * 8; i += 8) {
       cursorIds.push(String(dv.getBigInt64(i, true)));
     }
 
@@ -481,7 +495,11 @@ class OpCompressed {
     this.contents = values.contents;
   }
 
-  static async Read(buf: Uint8Array, length: number, options: ParseOptions): Promise<{ msg: OpCompressed, readBytes: number }> {
+  static async Read(
+    buf: Uint8Array,
+    length: number,
+    options: ParseOptions
+  ): Promise<{ msg: OpCompressed; readBytes: number }> {
     if (options.allowCompressed === false) {
       throw new Error('Compressed messages are not accepted');
     }
@@ -500,11 +518,21 @@ class OpCompressed {
     }
     let compressorId: string;
     switch (compressorIdN) {
-      case 0: compressorId = 'noop'; break;
-      case 1: compressorId = 'snappy'; break;
-      case 2: compressorId = 'zlib'; break;
-      case 3: compressorId = 'zstd'; break;
-      default: compressorId = `unknown (${compressorIdN})`; break;
+      case 0:
+        compressorId = 'noop';
+        break;
+      case 1:
+        compressorId = 'snappy';
+        break;
+      case 2:
+        compressorId = 'zlib';
+        break;
+      case 3:
+        compressorId = 'zstd';
+        break;
+      default:
+        compressorId = `unknown (${compressorIdN})`;
+        break;
     }
 
     const compressed = view(buf, length, 9, length - 9);
@@ -514,7 +542,9 @@ class OpCompressed {
     } else if (compressorId === 'zlib') {
       uncompressed = await promisify(zlib.inflate)(compressed, { maxOutputLength: Math.max(uncompressedSize, 1) });
       if (uncompressed.length !== uncompressedSize) {
-        throw new RangeError(`Uncompressed size ${uncompressed.length} does not match declared size ${uncompressedSize}`);
+        throw new RangeError(
+          `Uncompressed size ${uncompressed.length} does not match declared size ${uncompressedSize}`
+        );
       }
     }
 
@@ -552,7 +582,7 @@ class OpReply {
     this.documents = values.documents;
   }
 
-  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpReply, readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number): Promise<{ msg: OpReply; readBytes: number }> {
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     let i = 0;
     const flags = dv.getInt32(i, true);
@@ -595,22 +625,36 @@ class OpUnknown {
   }
 }
 
-async function ReadOpContents(opcode: number, data: Uint8Array, length: number, options: ParseOptions): Promise<{ msg: OpContents, readBytes: number }> {
+async function ReadOpContents(
+  opcode: number,
+  data: Uint8Array,
+  length: number,
+  options: ParseOptions
+): Promise<{ msg: OpContents; readBytes: number }> {
   // Readers build DataViews of `length` bytes over data's underlying buffer
   if (length < 0 || length > data.length) {
     throw new RangeError(`Invalid message body length ${length}`);
   }
 
   switch (opcode) {
-    case OpCode.OP_MSG: return OpMsg.Read(data, length);
-    case OpCode.OP_REPLY: return OpReply.Read(data, length);
-    case OpCode.OP_UPDATE: return OpUpdate.Read(data, length);
-    case OpCode.OP_INSERT: return OpInsert.Read(data, length);
-    case OpCode.OP_QUERY: return OpQuery.Read(data, length);
-    case OpCode.OP_GET_MORE: return OpGetMore.Read(data, length);
-    case OpCode.OP_DELETE: return OpDelete.Read(data, length);
-    case OpCode.OP_KILL_CURSORS: return OpKillCursors.Read(data, length);
-    case OpCode.OP_COMPRESSED: return OpCompressed.Read(data, length, options);
+    case OpCode.OP_MSG:
+      return OpMsg.Read(data, length);
+    case OpCode.OP_REPLY:
+      return OpReply.Read(data, length);
+    case OpCode.OP_UPDATE:
+      return OpUpdate.Read(data, length);
+    case OpCode.OP_INSERT:
+      return OpInsert.Read(data, length);
+    case OpCode.OP_QUERY:
+      return OpQuery.Read(data, length);
+    case OpCode.OP_GET_MORE:
+      return OpGetMore.Read(data, length);
+    case OpCode.OP_DELETE:
+      return OpDelete.Read(data, length);
+    case OpCode.OP_KILL_CURSORS:
+      return OpKillCursors.Read(data, length);
+    case OpCode.OP_COMPRESSED:
+      return OpCompressed.Read(data, length, options);
     default: {
       return {
         msg: new OpUnknown({ actualOpCode: opcode, body: data.subarray(0, length) }),
@@ -631,7 +675,10 @@ export class FullMessage {
 }
 
 // needBytes is the number of additional bytes required before parsing can continue
-export async function ParseMessage(data: Uint8Array, options: ParseOptions = {}): Promise<{ msg: FullMessage, readBytes: number } | { needBytes: number }> {
+export async function ParseMessage(
+  data: Uint8Array,
+  options: ParseOptions = {}
+): Promise<{ msg: FullMessage; readBytes: number } | { needBytes: number }> {
   if (data.length < 16) {
     return { needBytes: 16 - data.length };
   }
@@ -645,11 +692,14 @@ export async function ParseMessage(data: Uint8Array, options: ParseOptions = {})
   if (header.messageLength > data.length) {
     return { needBytes: header.messageLength - data.length };
   }
-  const contents = (await ReadOpContents(
-    header.opCode,
-    data.subarray(headerBytes, header.messageLength),
-    header.messageLength - headerBytes,
-    options)).msg;
+  const contents = (
+    await ReadOpContents(
+      header.opCode,
+      data.subarray(headerBytes, header.messageLength),
+      header.messageLength - headerBytes,
+      options
+    )
+  ).msg;
   return {
     msg: new FullMessage(header, contents),
     readBytes: header.messageLength
@@ -672,7 +722,7 @@ export function getSaslCommand(msg: FullMessage): SaslCommandInfo {
   }
 
   const opMsg = msg.contents as OpMsg;
-  const bodySection = opMsg.sections.find(s => s.kind === 'Body') as OpMsgBodySection | undefined;
+  const bodySection = opMsg.sections.find((s) => s.kind === 'Body') as OpMsgBodySection | undefined;
   if (!bodySection) {
     return { type: null };
   }
@@ -707,7 +757,7 @@ export function getCommandDb(msg: FullMessage): string | null {
   }
 
   const opMsg = msg.contents as OpMsg;
-  const bodySection = opMsg.sections.find(s => s.kind === 'Body') as OpMsgBodySection | undefined;
+  const bodySection = opMsg.sections.find((s) => s.kind === 'Body') as OpMsgBodySection | undefined;
   if (!bodySection) {
     return null;
   }
@@ -721,7 +771,7 @@ export function getCommandBody(msg: FullMessage): Record<string, unknown> | null
   }
 
   const opMsg = msg.contents as OpMsg;
-  const bodySection = opMsg.sections.find(s => s.kind === 'Body') as OpMsgBodySection | undefined;
+  const bodySection = opMsg.sections.find((s) => s.kind === 'Body') as OpMsgBodySection | undefined;
   if (!bodySection) {
     return null;
   }

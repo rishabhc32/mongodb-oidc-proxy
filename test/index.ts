@@ -17,7 +17,7 @@ before(() => {
   hostport = process.env.MONGODB_HOSTPORT;
 });
 
-describe('Proxy', function() {
+describe('Proxy', function () {
   this.timeout(10_000);
 
   let proxy: Proxy;
@@ -45,22 +45,30 @@ describe('Proxy', function() {
   });
 
   it('records ismaster events', async () => {
-    assert(events.some(ev => ev.source === 'outgoing' && ev.msg?.contents.query?.data?.ismaster),
-      EJSON.stringify(events) + ' is missing ismaster query');
-    assert(events.some(ev => ev.source === 'incoming' && ev.msg?.contents.documents?.[0]?.data?.ismaster),
-      EJSON.stringify(events) + ' is missing ismaster reply');
+    assert(
+      events.some((ev) => ev.source === 'outgoing' && ev.msg?.contents.query?.data?.ismaster),
+      EJSON.stringify(events) + ' is missing ismaster query'
+    );
+    assert(
+      events.some((ev) => ev.source === 'incoming' && ev.msg?.contents.documents?.[0]?.data?.ismaster),
+      EJSON.stringify(events) + ' is missing ismaster reply'
+    );
   });
 
   it('records find queries', async () => {
     await client.db('test').collection('test').findOne();
-    assert(events.some(ev => ev.source === 'outgoing' && ev.msg?.contents.sections?.[0]?.body?.data?.find === 'test'),
-      EJSON.stringify(events) + ' is missing findOne query');
-    assert(events.some(ev => ev.source === 'incoming' && ev.msg?.contents.sections?.[0]?.body?.data?.cursor),
-      EJSON.stringify(events) + ' is missing findOne reply');
+    assert(
+      events.some((ev) => ev.source === 'outgoing' && ev.msg?.contents.sections?.[0]?.body?.data?.find === 'test'),
+      EJSON.stringify(events) + ' is missing findOne query'
+    );
+    assert(
+      events.some((ev) => ev.source === 'incoming' && ev.msg?.contents.sections?.[0]?.body?.data?.cursor),
+      EJSON.stringify(events) + ' is missing findOne reply'
+    );
   });
 });
 
-describe('bin', function() {
+describe('bin', function () {
   this.timeout(10_000);
 
   let proc: childProcess.ChildProcess;
@@ -70,12 +78,19 @@ describe('bin', function() {
 
   describe('human-readable', () => {
     beforeEach(async () => {
-      proc = childProcess.spawn('ts-node', [
-        '-P', path.join(__dirname, '..', 'tsconfig.json'),
-        '-r', 'tsconfig-paths/register',
-        path.join(__dirname, '..', 'src', 'cli.ts'),
-        hostport, 'localhost:0'
-      ], { stdio: 'pipe' });
+      proc = childProcess.spawn(
+        'ts-node',
+        [
+          '-P',
+          path.join(__dirname, '..', 'tsconfig.json'),
+          '-r',
+          'tsconfig-paths/register',
+          path.join(__dirname, '..', 'src', 'cli.ts'),
+          hostport,
+          'localhost:0'
+        ],
+        { stdio: 'pipe' }
+      );
       port = 0;
       await new Promise<void>((resolve) => {
         stdout = '';
@@ -145,17 +160,27 @@ describe('bin', function() {
     beforeEach(async () => {
       tmpDir = fs.mkdtempDisposableSync(path.join(os.tmpdir(), 'proxy-test-'));
       logFile = path.join(tmpDir.path, 'proxy.log');
-      proc = childProcess.spawn('ts-node', [
-        '-P', path.join(__dirname, '..', 'tsconfig.json'),
-        '-r', 'tsconfig-paths/register',
-        path.join(__dirname, '..', 'src', 'cli.ts'),
-        '--ndjson',
-        '--log-file', logFile,
-        hostport, 'localhost:0'
-      ], { stdio: 'pipe' });
+      proc = childProcess.spawn(
+        'ts-node',
+        [
+          '-P',
+          path.join(__dirname, '..', 'tsconfig.json'),
+          '-r',
+          'tsconfig-paths/register',
+          path.join(__dirname, '..', 'src', 'cli.ts'),
+          '--ndjson',
+          '--log-file',
+          logFile,
+          hostport,
+          'localhost:0'
+        ],
+        { stdio: 'pipe' }
+      );
       stdout = '';
       (proc.stdout as any).setEncoding('utf8');
-      (proc.stdout as any).on('data', (chunk: string) => { stdout += chunk; });
+      (proc.stdout as any).on('data', (chunk: string) => {
+        stdout += chunk;
+      });
       // Wait for listening event to appear in the log file
       const listening = await waitForLogEvent(logFile, 'listening');
       port = listening.addr.port;
@@ -173,8 +198,14 @@ describe('bin', function() {
       await client.db('test').collection('test').findOne();
       const content = fs.readFileSync(logFile, 'utf8');
       const events = parseNdjsonLines(content);
-      assert(events.some((e) => e.ev === 'listening'), 'log file should contain listening event');
-      assert(events.some((e) => e.ev === 'commandForwarded'), 'log file should contain commandForwarded events');
+      assert(
+        events.some((e) => e.ev === 'listening'),
+        'log file should contain listening event'
+      );
+      assert(
+        events.some((e) => e.ev === 'commandForwarded'),
+        'log file should contain commandForwarded events'
+      );
     });
 
     it('does not write ndjson to stdout when --log-file is used', async () => {
@@ -198,13 +229,20 @@ describe('bin', function() {
         .filter(Boolean);
 
     beforeEach(async () => {
-      proc = childProcess.spawn('ts-node', [
-        '-P', path.join(__dirname, '..', 'tsconfig.json'),
-        '-r', 'tsconfig-paths/register',
-        path.join(__dirname, '..', 'src', 'cli.ts'),
-        '--ndjson',
-        hostport, 'localhost:0'
-      ], { stdio: 'pipe' });
+      proc = childProcess.spawn(
+        'ts-node',
+        [
+          '-P',
+          path.join(__dirname, '..', 'tsconfig.json'),
+          '-r',
+          'tsconfig-paths/register',
+          path.join(__dirname, '..', 'src', 'cli.ts'),
+          '--ndjson',
+          hostport,
+          'localhost:0'
+        ],
+        { stdio: 'pipe' }
+      );
       port = 0;
       await new Promise<void>((resolve) => {
         stdout = '';
@@ -212,14 +250,16 @@ describe('bin', function() {
         (proc.stdout as any).on('data', (chunk: string) => {
           stdout += chunk;
           if (!port) {
-            const listening =
-              stdout.split('\n').map(line => {
+            const listening = stdout
+              .split('\n')
+              .map((line) => {
                 try {
                   return JSON.parse(line);
                 } catch {
                   return {};
                 }
-              }).find(line => line.ev === 'listening');
+              })
+              .find((line) => line.ev === 'listening');
             if (listening) {
               port = listening.addr.port;
               resolve();

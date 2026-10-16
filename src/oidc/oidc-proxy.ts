@@ -34,9 +34,13 @@ function isManagedUser(user: Document, email: string): boolean {
     return true;
   }
   // Users provisioned before the marker existed carry exactly the proxy's role
-  return user.customData === undefined &&
-    Array.isArray(user.roles) && user.roles.length === 1 &&
-    user.roles[0].role === email && user.roles[0].db === 'admin';
+  return (
+    user.customData === undefined &&
+    Array.isArray(user.roles) &&
+    user.roles.length === 1 &&
+    user.roles[0].role === email &&
+    user.roles[0].db === 'admin'
+  );
 }
 
 export class OIDCProxy extends EventEmitter implements UserProvisioner {
@@ -64,7 +68,8 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
     this.maxConnections = config.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
     this.maxConnectionsPerUser = config.maxConnectionsPerUser;
     this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
-    this.jwtValidator = jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
+    this.jwtValidator =
+      jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
     this.messageBuilder = new MessageBuilder();
     this.idpInfo = { issuer: config.issuer, clientId: config.clientId };
     this.listenPort = config.listenPort;
@@ -81,7 +86,7 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
     };
 
     this.backendClient = new MongoClient(config.connectionString);
-    this.server = net.createServer(socket => this.handleConnection(socket));
+    this.server = net.createServer((socket) => this.handleConnection(socket));
   }
 
   async start(): Promise<void> {
@@ -103,11 +108,7 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
     }
 
     const closeServer = promisify(this.server.close.bind(this.server));
-    await Promise.allSettled([
-      closeServer(),
-      this.backendClient.close(),
-      this.userClients.closeAll()
-    ]);
+    await Promise.allSettled([closeServer(), this.backendClient.close(), this.userClients.closeAll()]);
   }
 
   address(): AddressInfo | string | null {
@@ -116,7 +117,11 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
 
   // Authorizes the user and leases the backend client shared by their connections.
   // `current` is the lease the calling connection already holds, if any
-  async provisionUser(email: string, current: UserClientLease | undefined, debug: (message: string) => void): Promise<ProvisionResult> {
+  async provisionUser(
+    email: string,
+    current: UserClientLease | undefined,
+    debug: (message: string) => void
+  ): Promise<ProvisionResult> {
     debug(`Checking roles for ${email}...`);
     const error = await this.authorizeUser(email);
     if (error) {
@@ -125,8 +130,10 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
 
     // Reauthenticating as the same user swaps one lease for another
     const held = current?.email === email ? 1 : 0;
-    if (this.maxConnectionsPerUser !== undefined &&
-      this.userClients.connectionCount(email) - held >= this.maxConnectionsPerUser) {
+    if (
+      this.maxConnectionsPerUser !== undefined &&
+      this.userClients.connectionCount(email) - held >= this.maxConnectionsPerUser
+    ) {
       return { error: `Too many connections for user '${email}'` };
     }
 
@@ -425,10 +432,7 @@ export class OIDCConnection extends EventEmitter {
         this.subject = result.subject;
         this.tokenExp = result.exp;
 
-        this.write(this.messageBuilder.buildAuthSuccessResponse(
-          msg.header.requestID,
-          this.conversationId
-        ));
+        this.write(this.messageBuilder.buildAuthSuccessResponse(msg.header.requestID, this.conversationId));
         this.emit('authSuccess', email, this.subject);
         return;
       }
@@ -442,30 +446,20 @@ export class OIDCConnection extends EventEmitter {
     }
 
     // No JWT or validation failed - return IdP info for OIDC flow
-    this.write(this.messageBuilder.buildSaslStartResponse(
-      msg.header.requestID,
-      this.conversationId,
-      this.idpInfo
-    ));
+    this.write(this.messageBuilder.buildSaslStartResponse(msg.header.requestID, this.conversationId, this.idpInfo));
     this.emit('saslStart', this.idpInfo);
   }
 
   private async handleSaslContinue(msg: FullMessage, payload?: Uint8Array, conversationId?: number): Promise<void> {
     // Validate conversationId matches the one from saslStart
     if (conversationId !== this.conversationId) {
-      this.write(this.messageBuilder.buildAuthFailureResponse(
-        msg.header.requestID,
-        'Invalid conversationId'
-      ));
+      this.write(this.messageBuilder.buildAuthFailureResponse(msg.header.requestID, 'Invalid conversationId'));
       return;
     }
 
     const jwt = this.extractJwtFromPayload(payload);
     if (!jwt) {
-      this.write(this.messageBuilder.buildAuthFailureResponse(
-        msg.header.requestID,
-        'Missing or invalid JWT payload'
-      ));
+      this.write(this.messageBuilder.buildAuthFailureResponse(msg.header.requestID, 'Missing or invalid JWT payload'));
       return;
     }
 
@@ -475,10 +469,9 @@ export class OIDCConnection extends EventEmitter {
     // Validate JWT
     const result = await this.jwtValidator.validate(jwt);
     if (!result.valid) {
-      this.write(this.messageBuilder.buildAuthFailureResponse(
-        msg.header.requestID,
-        `Authentication failed: ${result.error}`
-      ));
+      this.write(
+        this.messageBuilder.buildAuthFailureResponse(msg.header.requestID, `Authentication failed: ${result.error}`)
+      );
       this.emit('authFailed', result?.email, result.error);
       return;
     }
@@ -497,15 +490,14 @@ export class OIDCConnection extends EventEmitter {
     this.email = email;
     this.tokenExp = result.exp;
 
-    this.write(this.messageBuilder.buildAuthSuccessResponse(
-      msg.header.requestID,
-      this.conversationId
-    ));
+    this.write(this.messageBuilder.buildAuthSuccessResponse(msg.header.requestID, this.conversationId));
     this.emit('authSuccess', email, result.subject);
   }
 
   private async provisionUser(requestId: number, email: string): Promise<UserClientLease | null> {
-    const result = await this.provisioner.provisionUser(email, this.lease, (message) => this.emit('debug', email, message));
+    const result = await this.provisioner.provisionUser(email, this.lease, (message) =>
+      this.emit('debug', email, message)
+    );
     if ('error' in result) {
       this.emit('debug', email, result.error);
       this.write(this.messageBuilder.buildAuthFailureResponse(requestId, result.error));
@@ -551,7 +543,9 @@ export class OIDCConnection extends EventEmitter {
       if (parts.length === 3) {
         return JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     return null;
   }
 
@@ -572,9 +566,10 @@ export class OIDCConnection extends EventEmitter {
     };
 
     // Use OP_REPLY for legacy OP_QUERY, OP_MSG for modern messages
-    const response = msg.contents.opCode === 'OP_QUERY'
-      ? this.messageBuilder.buildOpReply(msg.header.requestID, helloResponse)
-      : this.messageBuilder.buildCommandResponse(msg.header.requestID, helloResponse);
+    const response =
+      msg.contents.opCode === 'OP_QUERY'
+        ? this.messageBuilder.buildOpReply(msg.header.requestID, helloResponse)
+        : this.messageBuilder.buildCommandResponse(msg.header.requestID, helloResponse);
     this.write(response);
   }
 
@@ -595,12 +590,14 @@ export class OIDCConnection extends EventEmitter {
     // Release the user's backend client; a lease is acquired again on reauth
     this.replaceLease(undefined);
 
-    this.write(this.messageBuilder.buildErrorResponse(
-      requestID,
-      `Reauthentication required: ${reason}`,
-      391,
-      'ReauthenticationRequired'
-    ));
+    this.write(
+      this.messageBuilder.buildErrorResponse(
+        requestID,
+        `Reauthentication required: ${reason}`,
+        391,
+        'ReauthenticationRequired'
+      )
+    );
     this.emit('reauthRequired', this.email, reason);
   }
 
@@ -610,10 +607,7 @@ export class OIDCConnection extends EventEmitter {
     const cmdName = this.getCommandName(body);
 
     if (!body) {
-      const response = this.messageBuilder.buildErrorResponse(
-        msg.header.requestID,
-        'Invalid command format'
-      );
+      const response = this.messageBuilder.buildErrorResponse(msg.header.requestID, 'Invalid command format');
       this.write(response);
       return;
     }
@@ -644,30 +638,15 @@ export class OIDCConnection extends EventEmitter {
         }
       }
 
-      const response = this.messageBuilder.buildCommandResponse(
-        msg.header.requestID,
-        result
-      );
+      const response = this.messageBuilder.buildCommandResponse(msg.header.requestID, result);
       this.write(response);
 
       const requestBytes = msg.header?.messageLength ?? 0;
       const responseBytes = response.length;
-      this.emit(
-        'commandForwarded',
-        this.email,
-        dbName,
-        cmdName,
-        command,
-        result,
-        requestBytes,
-        responseBytes
-      );
+      this.emit('commandForwarded', this.email, dbName, cmdName, command, result, requestBytes, responseBytes);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      const response = this.messageBuilder.buildErrorResponse(
-        msg.header.requestID,
-        errorMessage
-      );
+      const response = this.messageBuilder.buildErrorResponse(msg.header.requestID, errorMessage);
       this.write(response);
       this.emit('commandError', this.email, errorMessage, dbName, cmdName, command);
     }

@@ -85,7 +85,7 @@ function waitForResponse(client: net.Socket): Promise<Buffer> {
   return new ResponseReader(client).read();
 }
 
-describe('MessageBuilder', function() {
+describe('MessageBuilder', function () {
   let builder: MessageBuilder;
 
   beforeEach(() => {
@@ -263,7 +263,7 @@ describe('MessageBuilder', function() {
   });
 });
 
-describe('OIDCProxy', function() {
+describe('OIDCProxy', function () {
   let hostport: string;
 
   before(() => {
@@ -399,8 +399,8 @@ describe('OIDCProxy', function() {
 
     after(async () => {
       const adminDb = adminClient.db('admin');
-      await adminDb.command({ dropUser: email }).catch(() => { });
-      await adminDb.command({ dropRole: email }).catch(() => { });
+      await adminDb.command({ dropUser: email }).catch(() => {});
+      await adminDb.command({ dropRole: email }).catch(() => {});
       await adminClient.close();
     });
 
@@ -429,12 +429,14 @@ describe('OIDCProxy', function() {
       const reader1 = new ResponseReader(client1);
       await new Promise<void>((resolve) => client1.connect(addr.port, 'localhost', resolve));
 
-      client1.write(buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-        $db: 'admin'
-      }));
+      client1.write(
+        buildOpMsg({
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+          $db: 'admin'
+        })
+      );
       await reader1.read();
       const firstPassword = (proxy as any).userPasswordCache.get(email);
       client1.destroy();
@@ -444,12 +446,14 @@ describe('OIDCProxy', function() {
       const reader2 = new ResponseReader(client2);
       await new Promise<void>((resolve) => client2.connect(addr.port, 'localhost', resolve));
 
-      client2.write(buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-        $db: 'admin'
-      }));
+      client2.write(
+        buildOpMsg({
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+          $db: 'admin'
+        })
+      );
       await reader2.read();
       const secondPassword = (proxy as any).userPasswordCache.get(email);
       client2.destroy();
@@ -607,12 +611,15 @@ describe('OIDCProxy', function() {
       const authSuccessPromise = once(conn, 'authSuccess');
 
       // Authenticate
-      const saslStartMsg = buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-        $db: 'admin'
-      }, 1);
+      const saslStartMsg = buildOpMsg(
+        {
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+          $db: 'admin'
+        },
+        1
+      );
 
       client.write(saslStartMsg);
       await reader.read(); // Wait for auth response
@@ -880,7 +887,7 @@ describe('OIDCProxy', function() {
   });
 });
 
-describe('JWTValidator', function() {
+describe('JWTValidator', function () {
   it('constructs with default JWKS URI', () => {
     // Just verify it doesn't throw
     const validator = new JWTValidator('https://auth.example.com', 'client-id');
@@ -888,21 +895,12 @@ describe('JWTValidator', function() {
   });
 
   it('constructs with custom JWKS URI', () => {
-    const validator = new JWTValidator(
-      'https://auth.example.com',
-      'client-id',
-      'https://auth.example.com/custom/jwks'
-    );
+    const validator = new JWTValidator('https://auth.example.com', 'client-id', 'https://auth.example.com/custom/jwks');
     assert(validator !== null);
   });
 
   it('constructs with audience', () => {
-    const validator = new JWTValidator(
-      'https://auth.example.com',
-      'client-id',
-      undefined,
-      'https://api.example.com'
-    );
+    const validator = new JWTValidator('https://auth.example.com', 'client-id', undefined, 'https://api.example.com');
     assert(validator !== null);
   });
 
@@ -930,7 +928,7 @@ describe('JWTValidator', function() {
   });
 });
 
-describe('JWTValidator with real keys', function() {
+describe('JWTValidator with real keys', function () {
   this.timeout(10_000);
 
   let jwksServer: http.Server;
@@ -978,10 +976,7 @@ describe('JWTValidator with real keys', function() {
   }
 
   it('validates JWT successfully with all required claims', async () => {
-    const validator = new JWTValidator(
-      `http://localhost:${jwksPort}`,
-      'test-client-id'
-    );
+    const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
 
     const token = await createSignedJWT({
       client_id: 'test-client-id',
@@ -997,10 +992,7 @@ describe('JWTValidator with real keys', function() {
   });
 
   it('returns CLIENT_ID_MISMATCH when client_id does not match', async () => {
-    const validator = new JWTValidator(
-      `http://localhost:${jwksPort}`,
-      'expected-client-id'
-    );
+    const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'expected-client-id');
 
     const token = await createSignedJWT({
       client_id: 'wrong-client-id',
@@ -1014,10 +1006,7 @@ describe('JWTValidator with real keys', function() {
   });
 
   it('returns INVALID when email claim is missing', async () => {
-    const validator = new JWTValidator(
-      `http://localhost:${jwksPort}`,
-      'test-client-id'
-    );
+    const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
 
     const token = await createSignedJWT({
       client_id: 'test-client-id',
@@ -1031,7 +1020,11 @@ describe('JWTValidator with real keys', function() {
     assert.strictEqual(result.error, 'Email claim is required in JWT');
   });
 
-  for (const [label, email] of [['is not a string', { user: 'root' }], ['has no @', 'root'], ['contains whitespace', 'a b@example.com']] as const) {
+  for (const [label, email] of [
+    ['is not a string', { user: 'root' }],
+    ['has no @', 'root'],
+    ['contains whitespace', 'a b@example.com']
+  ] as const) {
     it(`returns INVALID when the email claim ${label}`, async () => {
       const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
       const token = await createSignedJWT({ client_id: 'test-client-id', email });
@@ -1045,7 +1038,11 @@ describe('JWTValidator with real keys', function() {
 
   it('returns INVALID when email_verified is false', async () => {
     const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
-    const token = await createSignedJWT({ client_id: 'test-client-id', email: 'user@example.com', email_verified: false });
+    const token = await createSignedJWT({
+      client_id: 'test-client-id',
+      email: 'user@example.com',
+      email_verified: false
+    });
 
     const result = await validator.validate(token);
     assert.strictEqual(result.valid, false);
@@ -1055,7 +1052,11 @@ describe('JWTValidator with real keys', function() {
 
   it('accepts email_verified true', async () => {
     const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
-    const token = await createSignedJWT({ client_id: 'test-client-id', email: 'user@example.com', email_verified: true });
+    const token = await createSignedJWT({
+      client_id: 'test-client-id',
+      email: 'user@example.com',
+      email_verified: true
+    });
 
     const result = await validator.validate(token);
     assert.strictEqual(result.valid, true);
@@ -1077,10 +1078,7 @@ describe('JWTValidator with real keys', function() {
   });
 
   it('returns INVALID when client_id is missing', async () => {
-    const validator = new JWTValidator(
-      `http://localhost:${jwksPort}`,
-      'test-client-id'
-    );
+    const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
 
     const token = await createSignedJWT({
       email: 'user@example.com'
@@ -1093,10 +1091,7 @@ describe('JWTValidator with real keys', function() {
   });
 
   it('returns EXPIRED for expired token', async () => {
-    const validator = new JWTValidator(
-      `http://localhost:${jwksPort}`,
-      'test-client-id'
-    );
+    const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
 
     // Create an already-expired token
     const token = await new SignJWT({
@@ -1178,7 +1173,7 @@ describe('JWTValidator with real keys', function() {
   });
 });
 
-describe('OIDCProxy with mock validator', function() {
+describe('OIDCProxy with mock validator', function () {
   this.timeout(10_000);
 
   let hostport: string;
@@ -1339,12 +1334,15 @@ describe('OIDCProxy with mock validator', function() {
       const commandForwardedPromise = once(conn, 'commandForwarded');
 
       // Authenticate
-      const saslStartMsg = buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-        $db: 'admin'
-      }, 1);
+      const saslStartMsg = buildOpMsg(
+        {
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+          $db: 'admin'
+        },
+        1
+      );
 
       client.write(saslStartMsg);
       await reader.read(); // Wait for auth response
@@ -1396,12 +1394,15 @@ describe('OIDCProxy with mock validator', function() {
       const reauthPromise = once(conn, 'reauthRequired');
 
       // Authenticate (will succeed but token is expired)
-      const saslStartMsg = buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-        $db: 'admin'
-      }, 1);
+      const saslStartMsg = buildOpMsg(
+        {
+          saslStart: 1,
+          mechanism: 'MONGODB-OIDC',
+          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+          $db: 'admin'
+        },
+        1
+      );
 
       client.write(saslStartMsg);
       await reader.read(); // Wait for auth response
@@ -1489,12 +1490,16 @@ describe('OIDCProxy with mock validator', function() {
         client.write(buildOpMsg(doc, requestId));
         return deserialize((await reader.read()).subarray(21));
       };
-      const login = (requestId: number) => request({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-        $db: 'admin'
-      }, requestId);
+      const login = (requestId: number) =>
+        request(
+          {
+            saslStart: 1,
+            mechanism: 'MONGODB-OIDC',
+            payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+            $db: 'admin'
+          },
+          requestId
+        );
       return { client, conn, request, login };
     }
 
@@ -1664,12 +1669,17 @@ describe('OIDCProxy with mock validator', function() {
         await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
         [conn] = await newConnection;
 
-        client.write(buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-          $db: 'admin'
-        }, 1));
+        client.write(
+          buildOpMsg(
+            {
+              saslStart: 1,
+              mechanism: 'MONGODB-OIDC',
+              payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+              $db: 'admin'
+            },
+            1
+          )
+        );
 
         const provisioned = (): MongoClient | undefined => connectSpy.thisValues[0];
         await waitFor(() => !!provisioned() && closeSpy.calledOn(provisioned()));
@@ -1688,7 +1698,9 @@ describe('OIDCProxy with mock validator', function() {
       const proxy = new OIDCProxy(config(), validFor(email));
       await proxy.start();
       const dbStub = sinon.stub((proxy as any).backendClient, 'db').returns({
-        command: async () => { throw new Error('backend unavailable'); }
+        command: async () => {
+          throw new Error('backend unavailable');
+        }
       });
       const first = await connect(proxy);
 
@@ -1771,24 +1783,32 @@ describe('OIDCProxy with mock validator', function() {
     });
 
     async function loginAs(user: string): Promise<Record<string, any>> {
-      const proxy = new OIDCProxy(config(), new MockJWTValidator({
-        valid: true,
-        subject: user,
-        email: user,
-        exp: Math.floor(Date.now() / 1000) + 3600
-      }));
+      const proxy = new OIDCProxy(
+        config(),
+        new MockJWTValidator({
+          valid: true,
+          subject: user,
+          email: user,
+          exp: Math.floor(Date.now() / 1000) + 3600
+        })
+      );
       await proxy.start();
       const addr = proxy.address() as net.AddressInfo;
       const client = new net.Socket();
       const reader = new ResponseReader(client);
       try {
         await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
-        client.write(buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-          $db: 'admin'
-        }, 1));
+        client.write(
+          buildOpMsg(
+            {
+              saslStart: 1,
+              mechanism: 'MONGODB-OIDC',
+              payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+              $db: 'admin'
+            },
+            1
+          )
+        );
         return deserialize((await reader.read()).subarray(21));
       } finally {
         client.destroy();
@@ -1807,8 +1827,8 @@ describe('OIDCProxy with mock validator', function() {
     after(async () => {
       const adminDb = adminClient.db('admin');
       for (const name of ['unmanaged@example.com', 'legacy@example.com', 'fresh@example.com']) {
-        await adminDb.command({ dropUser: name }).catch(() => { });
-        await adminDb.command({ dropRole: name }).catch(() => { });
+        await adminDb.command({ dropUser: name }).catch(() => {});
+        await adminDb.command({ dropRole: name }).catch(() => {});
       }
       await adminClient.close();
     });
@@ -1827,7 +1847,10 @@ describe('OIDCProxy with mock validator', function() {
       await adminDb.command({
         createUser: user,
         pwd: 'original-password',
-        roles: [{ role: user, db: 'admin' }, { role: 'read', db: 'test' }]
+        roles: [
+          { role: user, db: 'admin' },
+          { role: 'read', db: 'test' }
+        ]
       });
 
       const response = await loginAs(user);
@@ -1835,7 +1858,9 @@ describe('OIDCProxy with mock validator', function() {
       assert.match(response.errmsg, /not managed by the proxy/);
 
       // Password and roles are untouched
-      const direct = new MongoClient(`mongodb://${encodeURIComponent(user)}:original-password@${hostport}/?authSource=admin`);
+      const direct = new MongoClient(
+        `mongodb://${encodeURIComponent(user)}:original-password@${hostport}/?authSource=admin`
+      );
       await direct.connect();
       await direct.close();
       assert.strictEqual((await getUser(user)).roles.length, 2);

@@ -3,13 +3,8 @@
     "cluster": [],
     "indices": [
       {
-        "names": [
-          "mongo-logs",
-          "mongo-logs-*"
-        ],
-        "privileges": [
-          "all"
-        ],
+        "names": ["mongo-logs", "mongo-logs-*"],
+        "privileges": ["all"],
         "allow_restricted_indices": false
       }
     ],
