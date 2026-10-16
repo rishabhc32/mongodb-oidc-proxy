@@ -34,13 +34,6 @@ The email is then authorized against MongoDB:
 - a role named exactly after the email must exist in the `admin` database; built-in roles are never granted
 - the proxy logs the user in as a MongoDB user of the same name with that single role, creating it with a random password if needed. It never takes over a user it did not create: users it creates are marked with `customData: { managedBy: "mongodb-oidc-proxy" }`, and an existing user without that mark is rejected
 
-**Upgrading from a version that did not mark users:** run `ops/mark-managed-users.js` once before deploying, or existing users are refused with `User '<email>' exists and is not managed by the proxy`. It marks every user whose only role is the same-named role in `admin`. Preview the list first, since any user it lists will have its password and roles managed by the proxy:
-
-```shell
-DRY_RUN=1 mongosh "<admin connection string>" ops/mark-managed-users.js
-mongosh "<admin connection string>" ops/mark-managed-users.js
-```
-
 The backend connection string needs a user that can run `rolesInfo`, `usersInfo`, `createUser` and `updateUser` on `admin` (for example `userAdminAnyDatabase`).
 
 All of a user's connections share one backend client. `--max-connections-per-user` caps how many authenticated connections one user may hold (default: unlimited).

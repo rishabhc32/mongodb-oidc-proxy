@@ -30,8 +30,7 @@ interface BackendInfo {
   params: URLSearchParams;
 }
 
-// True if the proxy created this user, so it may reset the user's password and roles.
-// Users created before the marker existed are marked by ops/mark-managed-users.js
+// True if the proxy created this user, so it may reset the user's password and roles
 function isManagedUser(user: Document): boolean {
   return user.customData?.managedBy === MANAGED_USER_MARKER;
 }
