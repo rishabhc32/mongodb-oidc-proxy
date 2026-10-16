@@ -7,6 +7,7 @@ import { setTimeout } from 'timers/promises';
 import { MongoClient } from 'mongodb';
 import { MessageBuilder, OIDCProxy, JWTValidator, JWTValidationError } from '@src/oidc';
 import type { OIDCProxyConfig, JWTValidationResult } from '@src/oidc';
+import { ParseMessage } from '@src/parse';
 import * as random from '@src/utils/random';
 import sinon from 'sinon';
 import { SignJWT, generateKeyPair, exportJWK } from 'jose';
@@ -191,6 +192,21 @@ describe('MessageBuilder', function () {
 
       assert.strictEqual(parsed.code, 42);
       assert.strictEqual(parsed.codeName, 'UnknownError');
+    });
+  });
+
+  describe('compress', () => {
+    it('wraps a message in zlib OP_COMPRESSED with the same request IDs', async () => {
+      const compressed = await builder.compress(builder.buildOpMsg(42, { ok: 1, data: 'x'.repeat(1000) }));
+      assert(compressed.length < 1000);
+
+      const result = await ParseMessage(compressed);
+      assert('msg' in result);
+      assert.strictEqual(result.msg.header.responseTo, 42);
+      const contents = result.msg.contents as any;
+      assert.strictEqual(contents.opCode, 'OP_COMPRESSED');
+      assert.strictEqual(contents.compressorId, 'zlib');
+      assert.strictEqual(contents.contents.sections[0].body.data.data, 'x'.repeat(1000));
     });
   });
 
@@ -1807,6 +1823,72 @@ describe('OIDCProxy with mock validator', function () {
         client.destroy();
         await proxy.stop();
       }
+    });
+
+    describe('compression', () => {
+      it('offers zlib in hello only when the client asks for it', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const { client, request } = await connect(proxy);
+
+        try {
+          const offered = await request({ hello: 1, compression: ['snappy', 'zlib'], $db: 'admin' }, 1);
+          assert.deepStrictEqual(offered.compression, ['zlib']);
+          const notAsked = await request({ hello: 1, $db: 'admin' }, 2);
+          assert.strictEqual(notAsked.compression, undefined);
+          const unsupported = await request({ hello: 1, compression: ['zstd'], $db: 'admin' }, 3);
+          assert.strictEqual(unsupported.compression, undefined);
+        } finally {
+          client.destroy();
+          await proxy.stop();
+        }
+      });
+
+      it('serves a driver using zlib compression and compresses its replies', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const compressSpy = sinon.spy(MessageBuilder.prototype, 'compress');
+        const forwarded: string[] = [];
+        proxy.on('newConnection', (conn) =>
+          conn.on('commandForwarded', (_user: string, _db: string, cmd: string) => forwarded.push(cmd))
+        );
+        const port = (proxy.address() as net.AddressInfo).port;
+        const client = new MongoClient(
+          `mongodb://localhost:${port}/?authMechanism=MONGODB-OIDC&compressors=zlib&directConnection=true`,
+          { authMechanismProperties: { OIDC_CALLBACK: async () => ({ accessToken: 'mock.jwt.token' }) } }
+        );
+
+        try {
+          await client.connect();
+          assert.strictEqual((await client.db('admin').command({ ping: 1 })).ok, 1);
+          assert(forwarded.includes('ping'), 'the compressed ping should be forwarded');
+          assert(compressSpy.called, 'the reply should be compressed');
+        } finally {
+          compressSpy.restore();
+          await client.close();
+          await proxy.stop();
+        }
+      });
+
+      it('rejects a compressor it does not offer', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const { client, login } = await connect(proxy);
+
+        try {
+          await login(1);
+          const reader = new ResponseReader(client);
+          const message = await new MessageBuilder().compress(buildOpMsg({ ping: 1, $db: 'admin' }, 2));
+          message.writeUInt8(1, 16 + 8); // compressor id: snappy
+          client.write(message);
+          const reply = deserialize((await reader.read()).subarray(21));
+          assert.strictEqual(reply.ok, 0);
+          assert.strictEqual(reply.errmsg, 'Unsupported compressor snappy');
+        } finally {
+          client.destroy();
+          await proxy.stop();
+        }
+      });
     });
 
     describe('stop', () => {

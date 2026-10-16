@@ -263,7 +263,7 @@ export class OIDCConnection extends EventEmitter {
     this.messageBuilder = messageBuilder;
     this.proxy = proxy;
     this.idpInfo = idpInfo;
-    // Compression is never advertised, and decompressing before auth is a DoS vector
+    // Compressed messages are refused until the connection logs in (see replaceLease)
     this.parser = new WireProtocolParser({ allowCompressed: false });
 
     this.setupSocket(timeoutMs);
@@ -371,7 +371,22 @@ export class OIDCConnection extends EventEmitter {
     this.socket.write(buffer);
   }
 
-  private async handleMessage(msg: FullMessage): Promise<void> {
+  private async handleMessage(received: FullMessage): Promise<void> {
+    // A compressed request is handled as the message inside it, and answered compressed
+    let msg = received;
+    let compressReply = false;
+    if (received.contents.opCode === 'OP_COMPRESSED') {
+      const { compressorId, contents } = received.contents;
+      if (contents instanceof Uint8Array) {
+        this.write(
+          this.messageBuilder.buildErrorResponse(received.header.requestID, `Unsupported compressor ${compressorId}`)
+        );
+        return;
+      }
+      msg = new FullMessage(received.header, contents);
+      compressReply = compressorId === 'zlib';
+    }
+
     const opCode = msg.contents.opCode;
 
     // Handle legacy OP_QUERY (used by older drivers for ismaster)
@@ -424,7 +439,7 @@ export class OIDCConnection extends EventEmitter {
       return;
     }
 
-    await this.forwardCommand(msg, lease);
+    await this.forwardCommand(msg, lease, compressReply);
   }
 
   private async handleSaslStart(msg: FullMessage, payload?: Uint8Array): Promise<void> {
@@ -579,6 +594,12 @@ export class OIDCConnection extends EventEmitter {
       ok: 1
     };
 
+    // Offer zlib, the one compressor the proxy decodes, if the client asks for it
+    const requested = (getCommandBody(msg) ?? (msg.contents as any).query?.data)?.compression;
+    if (Array.isArray(requested) && requested.includes('zlib')) {
+      helloResponse.compression = ['zlib'];
+    }
+
     // Use OP_REPLY for legacy OP_QUERY, OP_MSG for modern messages
     const response =
       msg.contents.opCode === 'OP_QUERY'
@@ -592,6 +613,10 @@ export class OIDCConnection extends EventEmitter {
   private replaceLease(lease: UserClientLease | undefined): void {
     const previous = this.lease;
     this.lease = lease;
+    // Decompressing is the cheapest way for a client to use up the proxy's memory,
+    // so only logged-in connections may send compressed messages. Drivers never
+    // compress login messages
+    this.parser.options.allowCompressed = lease !== undefined;
     if (previous !== lease) {
       previous?.release();
     }
@@ -616,7 +641,7 @@ export class OIDCConnection extends EventEmitter {
 
   // Runs and logs the command as the lease's user, even if the connection
   // reauthenticates as someone else while it runs
-  private async forwardCommand(msg: FullMessage, lease: UserClientLease): Promise<void> {
+  private async forwardCommand(msg: FullMessage, lease: UserClientLease, compressReply: boolean): Promise<void> {
     const dbName = getCommandDb(msg) || 'admin';
     const body = getCommandBody(msg);
     const cmdName = this.getCommandName(body);
@@ -652,7 +677,8 @@ export class OIDCConnection extends EventEmitter {
         }
       }
 
-      const response = this.messageBuilder.buildCommandResponse(msg.header.requestID, result);
+      const reply = this.messageBuilder.buildCommandResponse(msg.header.requestID, result);
+      const response = compressReply ? await this.messageBuilder.compress(reply) : reply;
       this.write(response);
 
       const requestBytes = msg.header?.messageLength ?? 0;

@@ -38,6 +38,10 @@ The backend connection string needs a user that can run `rolesInfo`, `usersInfo`
 
 All of a user's connections share one backend client. `--max-connections-per-user` caps how many authenticated connections one user may hold (default: unlimited).
 
+### Compression
+
+Clients can compress traffic to the proxy with zlib, for example `compressors=zlib` in the connection string. The proxy accepts compressed messages only after login, and compresses its reply to each compressed request. To compress traffic between the proxy and MongoDB, add `compressors=zlib` to the backend connection string.
+
 ### Logging
 
 With `--ndjson`, every forwarded command is logged with its user, database, command name and full request (and the response at `--log-level debug`). The `pwd` field of `createUser`/`updateUser` commands is replaced with `[REDACTED]`.
