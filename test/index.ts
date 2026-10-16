@@ -149,7 +149,7 @@ describe('bin', function () {
 
   describe('ndjson --log-file', () => {
     let logFile: string;
-    let tmpDir: fs.DisposableTempDir;
+    let tmpDir: string;
 
     const parseNdjsonLines = (output: string) =>
       output
@@ -177,8 +177,8 @@ describe('bin', function () {
     };
 
     beforeEach(async () => {
-      tmpDir = fs.mkdtempDisposableSync(path.join(os.tmpdir(), 'proxy-test-'));
-      logFile = path.join(tmpDir.path, 'proxy.log');
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-test-'));
+      logFile = path.join(tmpDir, 'proxy.log');
       proc = childProcess.spawn(
         'ts-node',
         [
@@ -212,7 +212,7 @@ describe('bin', function () {
         proc.kill();
         await once(proc, 'exit');
       }
-      tmpDir[Symbol.dispose]();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
     it('writes ndjson events to log file', async () => {

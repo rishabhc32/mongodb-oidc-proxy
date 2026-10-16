@@ -1,6 +1,14 @@
-on: [push, pull_request]
+on:
+  push:
+    branches: [master]
+  pull_request:
 
 name: CI
+
+# A new push to a branch cancels its runs still in progress
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -9,24 +17,26 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node-version: [20.x, 22.x, 24.x]
+        node-version: [22.x, 24.x]
     runs-on: ${{matrix.os}}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v5
       - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
       - name: Install Dependencies
-        run: npm install
+        run: npm ci
       - name: Test
         run: npm test
 
   docker:
     name: Docker images
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build proxy image
         run: docker build -t mongodb-oidc-proxy .
       - name: Check proxy image starts

@@ -620,9 +620,11 @@ describe('OIDCProxy', function () {
 
       const client = new net.Socket();
       const reader = new ResponseReader(client);
+      // Listen before connecting: the proxy can emit newConnection before the connect callback runs
+      const newConnection = once(proxy, 'newConnection');
       await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
 
-      const [conn] = await once(proxy, 'newConnection');
+      const [conn] = await newConnection;
       const commandErrorPromise = once(conn, 'commandError');
       const authSuccessPromise = once(conn, 'authSuccess');
 
@@ -1338,9 +1340,11 @@ describe('OIDCProxy with mock validator', function () {
 
       const client = new net.Socket();
       const reader = new ResponseReader(client);
+      // Listen before connecting: the proxy can emit newConnection before the connect callback runs
+      const newConnection = once(proxy, 'newConnection');
       await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
 
-      const [conn] = await once(proxy, 'newConnection');
+      const [conn] = await newConnection;
       const commandForwardedPromise = once(conn, 'commandForwarded');
 
       // Authenticate
@@ -1398,9 +1402,11 @@ describe('OIDCProxy with mock validator', function () {
 
       const client = new net.Socket();
       const reader = new ResponseReader(client);
+      // Listen before connecting: the proxy can emit newConnection before the connect callback runs
+      const newConnection = once(proxy, 'newConnection');
       await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
 
-      const [conn] = await once(proxy, 'newConnection');
+      const [conn] = await newConnection;
       const reauthPromise = once(conn, 'reauthRequired');
 
       // Authenticate (will succeed but token is expired)
