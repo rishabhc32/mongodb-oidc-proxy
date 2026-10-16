@@ -9,7 +9,7 @@ import { WireProtocolParser } from '@src/parse-stream';
 import { FullMessage, MAX_MESSAGE_SIZE_BYTES, getSaslCommand, getCommandDb, getCommandBody } from '@src/parse';
 import { JWTValidator, JWTValidationError } from '@src/oidc/jwt-validator';
 import { MessageBuilder } from '@src/oidc/message-builder';
-import { Singleflight } from '@src/utils/sync';
+import { SharedClientPool } from '@src/oidc/shared-client-pool';
 import { randomBytes } from '@src/utils/random';
 import { ksuid } from '@src/utils/ksuid';
 import type { OIDCProxyConfig, IdpInfo } from '@src/oidc/types';
@@ -29,11 +29,6 @@ interface BackendInfo {
   params: URLSearchParams;
 }
 
-interface UserClientEntry {
-  client: Promise<MongoClient>;
-  refs: number;
-}
-
 function isManagedUser(user: Document, email: string): boolean {
   if (user.customData?.managedBy === MANAGED_USER_MARKER) {
     return true;
@@ -45,25 +40,24 @@ function isManagedUser(user: Document, email: string): boolean {
 }
 
 export class OIDCProxy extends EventEmitter implements UserProvisioner {
-  private server: Server;
-  private backendClient: MongoClient;
-  private jwtValidator: JWTValidator;
-  private messageBuilder: MessageBuilder;
-  private connections: Map<string, OIDCConnection> = new Map();
-  private userClients: Map<string, UserClientEntry> = new Map();
-  private maxConnections: number;
-  private maxConnectionsPerUser?: number;
-  private connectionTimeoutMs: number;
-  private backendInfo: BackendInfo;
-  private singleflight = new Singleflight();
-  private userPasswordCache = new LRUCache<string, string>({
+  private readonly server: Server;
+  private readonly backendClient: MongoClient;
+  private readonly jwtValidator: JWTValidator;
+  private readonly messageBuilder: MessageBuilder;
+  private readonly connections = new Set<OIDCConnection>();
+  private readonly userClients = new SharedClientPool();
+  private readonly maxConnections: number;
+  private readonly maxConnectionsPerUser?: number;
+  private readonly connectionTimeoutMs: number;
+  private readonly backendInfo: BackendInfo;
+  private readonly userPasswordCache = new LRUCache<string, string>({
     max: DEFAULT_MAX_CONNECTIONS,
     ttl: PASSWORD_CACHE_TTL_MS
   });
 
-  private idpInfo: IdpInfo;
-  private listenPort: number;
-  private listenHost?: string;
+  private readonly idpInfo: IdpInfo;
+  private readonly listenPort: number;
+  private readonly listenHost?: string;
 
   constructor(config: OIDCProxyConfig, jwtValidator?: JWTValidator) {
     super();
@@ -104,18 +98,15 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
   }
 
   async stop(): Promise<void> {
-    for (const conn of this.connections.values()) {
+    for (const conn of this.connections) {
       conn.emit('connectionClosed');
     }
-
-    const userClients = [...this.userClients.values()].map(entry => entry.client.then(client => client.close()));
-    this.userClients.clear();
 
     const closeServer = promisify(this.server.close.bind(this.server));
     await Promise.allSettled([
       closeServer(),
       this.backendClient.close(),
-      ...userClients
+      this.userClients.closeAll()
     ]);
   }
 
@@ -134,12 +125,12 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
 
     // Reauthenticating as the same user swaps one lease for another
     const held = current?.email === email ? 1 : 0;
-    const entry = this.userClients.get(email);
-    if (this.maxConnectionsPerUser !== undefined && entry && entry.refs - held >= this.maxConnectionsPerUser) {
+    if (this.maxConnectionsPerUser !== undefined &&
+      this.userClients.connectionCount(email) - held >= this.maxConnectionsPerUser) {
       return { error: `Too many connections for user '${email}'` };
     }
 
-    return { lease: await this.acquireUserClient(email, debug) };
+    return { lease: await this.userClients.acquire(email, () => this.connectUserClient(email, debug)) };
   }
 
   private async authorizeUser(email: string): Promise<string | null> {
@@ -161,50 +152,6 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
     return null;
   }
 
-  private async acquireUserClient(email: string, debug: (message: string) => void): Promise<UserClientLease> {
-    let entry = this.userClients.get(email);
-    if (!entry) {
-      const created: UserClientEntry = { client: this.connectUserClient(email, debug), refs: 0 };
-      created.client.catch(() => {
-        if (this.userClients.get(email) === created) {
-          this.userClients.delete(email);
-        }
-      });
-      this.userClients.set(email, created);
-      entry = created;
-    }
-
-    // Counted before awaiting, so concurrent logins see each other
-    const acquired = entry;
-    acquired.refs++;
-
-    let client: MongoClient;
-    try {
-      client = await acquired.client;
-    } catch (err) {
-      acquired.refs--;
-      throw err;
-    }
-
-    let released = false;
-    return {
-      email,
-      client,
-      release: () => {
-        if (released) {
-          return;
-        }
-        released = true;
-        if (--acquired.refs === 0) {
-          if (this.userClients.get(email) === acquired) {
-            this.userClients.delete(email);
-          }
-          client.close().catch(() => { });
-        }
-      }
-    };
-  }
-
   private async connectUserClient(email: string, debug: (message: string) => void): Promise<MongoClient> {
     const password = await this.ensureUserPassword(email, debug);
     const { protocol, host, params } = this.backendInfo;
@@ -213,6 +160,8 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
     ).connect();
   }
 
+  // Only called while creating a user's shared client, which the pool does at
+  // most once at a time per user, so concurrent logins never race here
   private async ensureUserPassword(email: string, debug: (message: string) => void): Promise<string> {
     const cachedPassword = this.userPasswordCache.get(email);
     if (cachedPassword) {
@@ -220,35 +169,31 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
       return cachedPassword;
     }
 
-    const { value } = await this.singleflight.do(email, async () => {
-      const adminDb = this.backendClient.db('admin');
+    const adminDb = this.backendClient.db('admin');
 
-      // Create/Update user with random password
-      const password = randomBytes(32).toString('base64');
-      const user = {
-        pwd: password,
-        roles: [{ role: email, db: 'admin' }],
-        customData: { managedBy: MANAGED_USER_MARKER }
-      };
+    // Create/Update user with random password
+    const password = randomBytes(32).toString('base64');
+    const user = {
+      pwd: password,
+      roles: [{ role: email, db: 'admin' }],
+      customData: { managedBy: MANAGED_USER_MARKER }
+    };
 
-      try {
-        await adminDb.command({ updateUser: email, ...user });
-        debug(`Updated user ${email}`);
-      } catch (err: any) {
-        if (err.codeName === 'UserNotFound') {
-          await adminDb.command({ createUser: email, ...user });
-          debug(`Created user ${email}`);
-        } else {
-          throw err;
-        }
+    try {
+      await adminDb.command({ updateUser: email, ...user });
+      debug(`Updated user ${email}`);
+    } catch (err: any) {
+      if (err.codeName === 'UserNotFound') {
+        await adminDb.command({ createUser: email, ...user });
+        debug(`Created user ${email}`);
+      } else {
+        throw err;
       }
+    }
 
-      // Set the new password in the cache
-      this.userPasswordCache.set(email, password);
-      return password;
-    });
-
-    return value;
+    // Set the new password in the cache
+    this.userPasswordCache.set(email, password);
+    return password;
   }
 
   private handleConnection(socket: Socket): void {
@@ -272,10 +217,10 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
       this.idpInfo
     );
 
-    this.connections.set(connId, conn);
+    this.connections.add(conn);
 
     conn.on('connectionClosed', () => {
-      this.connections.delete(connId);
+      this.connections.delete(conn);
     });
 
     this.emit('newConnection', conn);

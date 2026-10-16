@@ -383,7 +383,7 @@ describe('OIDCProxy', function() {
     });
   });
 
-  describe('provisioning cache and singleflight', () => {
+  describe('provisioning cache and deduplication', () => {
     const email = 'cache-test@example.com';
     let adminClient: MongoClient;
 
@@ -459,7 +459,7 @@ describe('OIDCProxy', function() {
       await proxy.stop();
     });
 
-    it('deduplicates concurrent provisions via singleflight', async () => {
+    it('deduplicates concurrent provisions of the same user', async () => {
       const mockValidator = new MockJWTValidator({
         valid: true,
         subject: email,
@@ -514,7 +514,7 @@ describe('OIDCProxy', function() {
         client1.destroy();
         client2.destroy();
 
-        // Singleflight should deduplicate - only one password generation
+        // Concurrent logins share one client creation - only one password generation
         assert.strictEqual(calls, 1);
       } finally {
         stub.restore();
@@ -1574,12 +1574,12 @@ describe('OIDCProxy with mock validator', function() {
         assert.strictEqual(authResponse.ok, 1);
         assert.strictEqual(conn.lease.client, firstClient);
         assert(closeSpy.notCalled, 'shared client should stay open');
-        assert.strictEqual((proxy as any).userClients.get(email).refs, 1);
+        assert.strictEqual((proxy as any).userClients.connectionCount(email), 1);
 
         client.destroy();
         await waitFor(() => closeSpy.called);
         assert(closeSpy.calledOnce, 'backend client should be closed when the connection closes');
-        assert(!(proxy as any).userClients.has(email));
+        assert.strictEqual((proxy as any).userClients.connectionCount(email), 0);
       } finally {
         client.destroy();
         await proxy.stop();
@@ -1600,7 +1600,7 @@ describe('OIDCProxy with mock validator', function() {
         const closeSpy = sinon.spy(shared, 'close');
 
         a.client.destroy();
-        await waitFor(() => (proxy as any).userClients.get(email)?.refs === 1);
+        await waitFor(() => (proxy as any).userClients.connectionCount(email) === 1);
         assert(closeSpy.notCalled, 'client should stay open while another connection uses it');
         assert.strictEqual((await b.request({ ping: 1, $db: 'admin' }, 2)).ok, 1);
 
