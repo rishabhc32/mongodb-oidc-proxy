@@ -5,11 +5,6 @@ import { type Binary, deserialize } from 'bson';
 // Largest message MongoDB accepts (its advertised maxMessageSizeBytes)
 export const MAX_MESSAGE_SIZE_BYTES = 48000000;
 
-export interface ParseOptions {
-  // Decompress OP_COMPRESSED messages (default: true)
-  allowCompressed?: boolean;
-}
-
 // Bounds-checked view of buf[offset, offset + size). buf is often a slice of a
 // larger shared allocation (Node's Buffer pool), so views must never be built
 // from buf.buffer directly or they can expose memory past the message
@@ -488,9 +483,9 @@ class OpCompressed {
   static async Read(
     buf: Uint8Array,
     length: number,
-    options: ParseOptions
+    allowCompressed: boolean
   ): Promise<{ msg: OpCompressed; readBytes: number }> {
-    if (options.allowCompressed === false) {
+    if (!allowCompressed) {
       throw new Error('Compressed messages are not accepted');
     }
 
@@ -537,7 +532,7 @@ class OpCompressed {
     if (uncompressed === null) {
       contents = compressed;
     } else {
-      contents = (await ReadOpContents(originalOpcode, uncompressed, uncompressed.length, options)).msg;
+      contents = (await ReadOpContents(originalOpcode, uncompressed, uncompressed.length, allowCompressed)).msg;
     }
 
     return {
@@ -614,7 +609,7 @@ async function ReadOpContents(
   opcode: number,
   data: Uint8Array,
   length: number,
-  options: ParseOptions
+  allowCompressed: boolean
 ): Promise<{ msg: OpContents; readBytes: number }> {
   switch (opcode) {
     case OpCode.OP_MSG:
@@ -634,7 +629,7 @@ async function ReadOpContents(
     case OpCode.OP_KILL_CURSORS:
       return OpKillCursors.Read(data, length);
     case OpCode.OP_COMPRESSED:
-      return OpCompressed.Read(data, length, options);
+      return OpCompressed.Read(data, length, allowCompressed);
     default: {
       return {
         msg: new OpUnknown({ actualOpCode: opcode, body: data.subarray(0, length) }),
@@ -654,10 +649,11 @@ export class FullMessage {
   }
 }
 
-// needBytes is the number of additional bytes required before parsing can continue
+// needBytes is the number of additional bytes required before parsing can continue.
+// With allowCompressed false, OP_COMPRESSED messages are rejected without being decompressed
 export async function ParseMessage(
   data: Uint8Array,
-  options: ParseOptions = {}
+  allowCompressed = true
 ): Promise<{ msg: FullMessage; readBytes: number } | { needBytes: number }> {
   if (data.length < 16) {
     return { needBytes: 16 - data.length };
@@ -677,7 +673,7 @@ export async function ParseMessage(
       header.opCode,
       data.subarray(headerBytes, header.messageLength),
       header.messageLength - headerBytes,
-      options
+      allowCompressed
     )
   ).msg;
   return {

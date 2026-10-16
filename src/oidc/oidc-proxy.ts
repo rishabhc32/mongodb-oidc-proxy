@@ -266,8 +266,8 @@ export class OIDCConnection extends EventEmitter {
     this.messageBuilder = messageBuilder;
     this.proxy = proxy;
     this.idpInfo = idpInfo;
-    // Compressed messages are refused until the connection logs in (see replaceLease)
-    this.parser = new WireProtocolParser({ allowCompressed: false });
+    this.parser = new WireProtocolParser();
+    this.parser.allowCompressed = false; // until login, see replaceLease
 
     this.setupSocket(timeoutMs);
   }
@@ -619,7 +619,7 @@ export class OIDCConnection extends EventEmitter {
     // Decompressing is the cheapest way for a client to use up the proxy's memory,
     // so only logged-in connections may send compressed messages. Drivers never
     // compress login messages
-    this.parser.options.allowCompressed = lease !== undefined;
+    this.parser.allowCompressed = lease !== undefined;
     if (previous !== lease) {
       previous?.release();
     }

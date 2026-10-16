@@ -99,7 +99,7 @@ describe('ParseMessage', () => {
 
     it('rejects compressed messages when not allowed', async () => {
       const data = opCompressed(OpCode.OP_MSG, original.length, 2, zlib.deflateSync(original));
-      await assert.rejects(ParseMessage(data, { allowCompressed: false }), /not accepted/);
+      await assert.rejects(ParseMessage(data, false), /not accepted/);
     });
 
     it('rejects nested compressed messages', async () => {
