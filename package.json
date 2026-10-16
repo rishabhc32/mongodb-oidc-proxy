@@ -16,6 +16,9 @@
     "url": "https://github.com/mongodb-labs/mongodb-wp-proxy/issues"
   },
   "main": "lib/index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "bin": {
     "mongodb-wp-proxy": "bin/mongodb-wp-proxy.js"
   },
