@@ -68,6 +68,25 @@ describe('Proxy', function () {
   });
 });
 
+describe('Proxy close', function () {
+  this.timeout(10_000);
+
+  it('closes open connections', async () => {
+    const proxy = new Proxy({ host: hostport.split(':')[0], port: +hostport.split(':')[1] });
+    const closed: string[] = [];
+    proxy.on('newConnection', (conn: any) => conn.on('connectionClosed', (source: string) => closed.push(source)));
+    await proxy.listen(0);
+    const client = await MongoClient.connect(`mongodb://localhost:${proxy.address().port}`);
+
+    try {
+      await proxy.close();
+      assert(closed.includes('outgoing') && closed.includes('incoming'), `closed: ${closed}`);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe('bin', function () {
   this.timeout(10_000);
 
@@ -189,8 +208,10 @@ describe('bin', function () {
 
     afterEach(async () => {
       await client?.close();
-      proc.kill();
-      await once(proc, 'exit');
+      if (proc.exitCode === null && proc.signalCode === null) {
+        proc.kill();
+        await once(proc, 'exit');
+      }
       tmpDir[Symbol.dispose]();
     });
 
@@ -205,6 +226,20 @@ describe('bin', function () {
       assert(
         events.some((e) => e.ev === 'commandForwarded'),
         'log file should contain commandForwarded events'
+      );
+    });
+
+    it('closes connections, flushes the log and exits 0 on SIGTERM', async () => {
+      await client.db('test').collection('test').findOne();
+      const exited = once(proc, 'exit');
+      proc.kill('SIGTERM');
+      const [code, signal] = await exited;
+      assert.strictEqual(signal, null);
+      assert.strictEqual(code, 0);
+      const events = parseNdjsonLines(fs.readFileSync(logFile, 'utf8'));
+      assert(
+        events.some((e) => e.ev === 'connectionClosed'),
+        'log file should contain the connectionClosed events written during shutdown'
       );
     });
 

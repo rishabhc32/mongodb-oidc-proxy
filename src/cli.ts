@@ -3,6 +3,7 @@ import { OIDCProxy, OIDCConnection } from '@src/oidc';
 import type { FullMessage } from '@src/parse';
 import { EJSON } from 'bson';
 import fs from 'fs';
+import os from 'os';
 import winston from 'winston';
 
 type OptionalUser = string | null | undefined;
@@ -152,9 +153,18 @@ function utcnow(): string {
   return new Date().toISOString();
 }
 
-function createWriteLog(logFile?: string): (json: string) => void {
+export interface LogSink {
+  writeLog: (json: string) => void;
+  // Resolves once every line written so far has reached the file or stdout
+  closeLog: () => Promise<void>;
+}
+
+export function createLogSink(logFile?: string): LogSink {
   if (!logFile) {
-    return (json: string) => console.log(json);
+    return {
+      writeLog: (json: string) => console.log(json),
+      closeLog: () => new Promise<void>((resolve) => process.stdout.write('', () => resolve()))
+    };
   }
   const logger = winston.createLogger({
     level: 'info',
@@ -168,7 +178,38 @@ function createWriteLog(logFile?: string): (json: string) => void {
       })
     ]
   });
-  return (json: string) => logger.info(json);
+  return {
+    writeLog: (json: string) => logger.info(json),
+    // 'finish' is emitted once the ended logger has flushed to its transports
+    closeLog: () =>
+      new Promise<void>((resolve) => {
+        logger.once('finish', () => resolve());
+        logger.end();
+      })
+  };
+}
+
+// `docker stop` sends SIGTERM, then SIGKILL 10 seconds later. Node runs as PID 1 in
+// the image, and PID 1 ignores signals it has no handler for, so without this the
+// proxy would be killed with requests in flight and log lines unwritten
+function shutdownOnSignal(shutdown: () => Promise<void>): void {
+  let shuttingDown = false;
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.on(signal, () => {
+      if (shuttingDown) {
+        // A second signal skips the graceful shutdown
+        process.exit(128 + os.constants.signals[signal]);
+      }
+      shuttingDown = true;
+      console.error(`Received ${signal}, shutting down`);
+      shutdown()
+        .then(() => process.exit(0))
+        .catch((err: Error) => {
+          console.error(`Error during shutdown: ${err.message}`);
+          process.exit(1);
+        });
+    });
+  }
 }
 
 async function runTransparentProxy(args: ParsedArgs): Promise<void> {
@@ -182,9 +223,13 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 
   const target = parseAddress(targetStr);
   const local = parseAddress(localStr);
-  const writeLog = createWriteLog(args.logFile);
+  const { writeLog, closeLog } = createLogSink(args.logFile);
 
   const proxy = new Proxy(target);
+  shutdownOnSignal(async () => {
+    await proxy.close().catch(() => {}); // Rejects if the signal came before listening
+    await closeLog();
+  });
 
   proxy.on('newConnection', (conn: ConnectionPair) => {
     if (args.ndjson) {
@@ -326,7 +371,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     process.exit(1);
   }
 
-  const writeLog = createWriteLog(args.logFile);
+  const { writeLog, closeLog } = createLogSink(args.logFile);
 
   const proxy = new OIDCProxy({
     issuer: args.issuer,
@@ -638,7 +683,17 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     });
   });
 
+  let started = false;
+  shutdownOnSignal(async () => {
+    // Before startup completes there is nothing to drain
+    if (started) {
+      await proxy.stop();
+    }
+    await closeLog();
+  });
+
   await proxy.start();
+  started = true;
 }
 
 export async function main(): Promise<void> {

@@ -1,4 +1,4 @@
-import net, { NetConnectOpts, Server } from 'net';
+import net, { NetConnectOpts, Server, Socket } from 'net';
 import { WireProtocolParser } from '@src/parse-stream';
 import { EventEmitter, once } from 'events';
 import { ksuid } from '@src/utils/ksuid';
@@ -29,6 +29,7 @@ export class ConnectionPair extends EventEmitter {
 
 export class Proxy extends EventEmitter {
   srv: Server;
+  private readonly sockets = new Set<Socket>();
 
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   constructor(target: NetConnectOpts) {
@@ -36,6 +37,8 @@ export class Proxy extends EventEmitter {
     this.srv = net.createServer();
     this.srv.on('connection', (conn1) => {
       const conn2 = net.createConnection(target);
+      this.track(conn1);
+      this.track(conn2);
 
       const conn1reader = new WireProtocolParser();
       const conn2reader = new WireProtocolParser();
@@ -101,7 +104,22 @@ export class Proxy extends EventEmitter {
     return this.srv.address();
   }
 
+  // Stops accepting connections and closes every open one
   async close(): Promise<void> {
-    await new Promise<void>((resolve, reject) => this.srv.close((err) => (err ? reject(err) : resolve())));
+    // Resolves once every connection has closed
+    const closed = new Promise<void>((resolve, reject) => this.srv.close((err) => (err ? reject(err) : resolve())));
+    const sockets = [...this.sockets].map(
+      (socket) =>
+        new Promise<void>((resolve) => {
+          socket.once('close', () => resolve());
+          socket.destroy();
+        })
+    );
+    await Promise.all([closed, ...sockets]);
+  }
+
+  private track(socket: Socket): void {
+    this.sockets.add(socket);
+    socket.on('close', () => this.sockets.delete(socket));
   }
 }

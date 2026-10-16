@@ -75,6 +75,8 @@ docker run -d --name mongodb-oidc-proxy \
 
 The proxy must listen on `0.0.0.0` inside the container, but it does not serve TLS. Publish the port on `127.0.0.1` (as above) or a private network only.
 
+On `docker stop` (SIGTERM) or Ctrl+C (SIGINT), the proxy stops accepting connections and gives commands already received up to 5 seconds to finish. It then closes every connection, flushes the log and exits with code 0. A second signal exits immediately.
+
 ### Log shipping to Elasticsearch
 
 [Vector](https://vector.dev) tails the proxy's log file from the shared volume and sends each event to Elasticsearch. The config is in `ops/vector/vector.yaml`. First run `setup-elasticsearch.sh` to create the ILM policy, index template and `mongo-logs` write alias. Then create an API key that can write to `mongo-logs*` (see `ops/elasticsearch-role.json`) and save its `encoded` value as the secret:

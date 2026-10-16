@@ -2,7 +2,7 @@ import assert from 'assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { parseArgs, parseAddress, redactPasswords, resolveConnectionString } from '@src/cli';
+import { createLogSink, parseArgs, parseAddress, redactPasswords, resolveConnectionString } from '@src/cli';
 
 describe('cli parseArgs', () => {
   it('parses --help flag', () => {
@@ -220,6 +220,23 @@ describe('cli resolveConnectionString', () => {
       () => resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: path.join(tmpDir, 'missing') }),
       /ENOENT/
     );
+  });
+});
+
+describe('cli createLogSink', () => {
+  it('has written every line to the log file once closeLog resolves', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-test-'));
+    try {
+      const logFile = path.join(tmpDir, 'proxy.log');
+      const { writeLog, closeLog } = createLogSink(logFile);
+      for (let i = 0; i < 10000; i++) {
+        writeLog(JSON.stringify({ i }));
+      }
+      await closeLog();
+      assert.strictEqual(fs.readFileSync(logFile, 'utf8').trim().split('\n').length, 10000);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

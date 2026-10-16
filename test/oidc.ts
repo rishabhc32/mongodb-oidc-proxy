@@ -1814,6 +1814,101 @@ describe('OIDCProxy with mock validator', function () {
         await proxy.stop();
       }
     });
+
+    describe('stop', () => {
+      it('closes open connections, reporting each close once', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const a = await connect(proxy);
+        const b = await connect(proxy);
+
+        try {
+          await a.login(1);
+          const userClient = a.conn.lease.client as MongoClient;
+          const closeSpy = sinon.spy(userClient, 'close');
+          let closeEvents = 0;
+          a.conn.on('connectionClosed', () => closeEvents++);
+          b.conn.on('connectionClosed', () => closeEvents++);
+          const clientsClosed = Promise.all([once(a.client, 'close'), once(b.client, 'close')]);
+
+          await proxy.stop();
+          await clientsClosed;
+          assert.strictEqual(closeEvents, 2);
+          assert(closeSpy.called, 'the user backend client should be closed');
+        } finally {
+          a.client.destroy();
+          b.client.destroy();
+        }
+      });
+
+      it('lets a running command finish and reply before closing its connection', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const { client, conn, request, login } = await connect(proxy);
+
+        try {
+          await login(1);
+          let finishCommand!: () => void;
+          const held = new Promise<void>((resolve) => {
+            finishCommand = resolve;
+          });
+          const dbStub = sinon.stub(conn.lease.client as MongoClient, 'db').returns({
+            command: async () => {
+              await held;
+              return { ok: 1 };
+            }
+          } as any);
+          let forwarded = false;
+          conn.on('commandForwarded', () => (forwarded = true));
+          const response = request({ ping: 1, $db: 'admin' }, 2);
+          await waitFor(() => dbStub.called);
+
+          let stopped = false;
+          const stopping = proxy.stop().then(() => (stopped = true));
+          await setTimeout(100);
+          assert(!stopped, 'stop should wait for the running command');
+
+          finishCommand();
+          assert.strictEqual((await response).ok, 1);
+          await stopping;
+          assert(forwarded, 'the command should be logged before stop resolves');
+        } finally {
+          client.destroy();
+        }
+      });
+
+      it('interrupts a command that outlives the drain timeout and reports it', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const { client, conn, login } = await connect(proxy);
+
+        try {
+          await login(1);
+          // Like the driver, fail the running command when its client is closed, here
+          // late enough that stop() must wait for the error to be reported
+          const userClient = conn.lease.client as MongoClient;
+          let interrupt!: (err: Error) => void;
+          sinon.stub(userClient, 'db').returns({
+            command: () => new Promise((resolve, reject) => (interrupt = reject))
+          } as any);
+          const close = userClient.close.bind(userClient);
+          sinon.stub(userClient, 'close').callsFake(async () => {
+            await close();
+            await setTimeout(100);
+            interrupt(new Error('Operation interrupted because client was closed'));
+          });
+          let reported: string | undefined;
+          conn.on('commandError', (_user: string, error: string) => (reported = error));
+          client.write(buildOpMsg({ ping: 1, $db: 'admin' }, 2));
+          await waitFor(() => !!interrupt);
+
+          await proxy.stop(100);
+          assert.strictEqual(reported, 'Operation interrupted because client was closed');
+        } finally {
+          client.destroy();
+        }
+      });
+    });
   });
 
   describe('login authorization', () => {

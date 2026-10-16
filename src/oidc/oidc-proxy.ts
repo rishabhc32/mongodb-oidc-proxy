@@ -1,7 +1,6 @@
 import net, { Server, Socket, AddressInfo } from 'net';
 import { URL } from 'url';
 import { EventEmitter } from 'events';
-import { promisify } from 'util';
 import { MongoClient, Document } from 'mongodb';
 import { deserialize, Long } from 'bson';
 import { LRUCache } from 'lru-cache';
@@ -18,6 +17,8 @@ import type { UserProvisioner, UserClientLease, ProvisionResult } from '@src/oid
 const DEFAULT_MAX_CONNECTIONS = 10000;
 const DEFAULT_CONNECTION_TIMEOUT_MS = 120000;
 const PASSWORD_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+// Fits within the 10 seconds `docker stop` waits before killing the process
+const DEFAULT_DRAIN_TIMEOUT_MS = 5000;
 
 // Stored in customData of MongoDB users the proxy creates, so it never resets
 // the password or roles of a user it does not own
@@ -94,13 +95,17 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
     });
   }
 
-  async stop(): Promise<void> {
-    for (const conn of this.connections) {
-      conn.emit('connectionClosed');
-    }
+  // Stops accepting connections and closes every open one, letting commands already
+  // received finish for up to `drainTimeoutMs`. Closing the backend clients then
+  // interrupts any command still running, and stop() resolves once each has been reported
+  async stop(drainTimeoutMs = DEFAULT_DRAIN_TIMEOUT_MS): Promise<void> {
+    // Resolves once every connection has closed, or at once if the server is not listening
+    const serverClosed = new Promise<void>((resolve) => this.server.close(() => resolve()));
+    const connections = [...this.connections];
 
-    const closeServer = promisify(this.server.close.bind(this.server));
-    await Promise.allSettled([closeServer(), this.backendClient.close(), this.userClients.closeAll()]);
+    await Promise.allSettled(connections.map((conn) => conn.close(drainTimeoutMs)));
+    await Promise.allSettled([serverClosed, this.backendClient.close(), this.userClients.closeAll()]);
+    await Promise.allSettled(connections.map((conn) => conn.idle()));
   }
 
   address(): AddressInfo | string | null {
@@ -235,6 +240,8 @@ export class OIDCConnection extends EventEmitter {
   private socket: Socket;
   private parser: WireProtocolParser;
   private lease?: UserClientLease;
+  private closing = false;
+  private readonly inFlight = new Set<Promise<void>>();
   private conversationId = 0;
   private authenticated = false;
   private subject?: string;
@@ -291,12 +298,18 @@ export class OIDCConnection extends EventEmitter {
     });
 
     this.parser.on('message', (msg: FullMessage) => {
-      this.handleMessage(msg).catch((err: Error) => {
-        // Fail only this request; an unhandled 'error' event would crash the proxy.
-        // Details go to the log, not to the (possibly unauthenticated) client
-        this.emit('connectionError', err);
-        this.write(this.messageBuilder.buildErrorResponse(msg.header.requestID, 'Internal proxy error'));
-      });
+      if (this.closing) {
+        return;
+      }
+      const handled: Promise<void> = this.handleMessage(msg)
+        .catch((err: Error) => {
+          // Fail only this request; an unhandled 'error' event would crash the proxy.
+          // Details go to the log, not to the (possibly unauthenticated) client
+          this.emit('connectionError', err);
+          this.write(this.messageBuilder.buildErrorResponse(msg.header.requestID, 'Internal proxy error'));
+        })
+        .finally(() => this.inFlight.delete(handled));
+      this.inFlight.add(handled);
     });
 
     // A malformed message leaves the stream unparseable, so drop the connection
@@ -332,6 +345,31 @@ export class OIDCConnection extends EventEmitter {
 
   getUser(): string | undefined {
     return this.email;
+  }
+
+  // Stops reading requests, gives the ones already received up to `timeoutMs` to
+  // finish and reply, then closes the socket. Requests the client sends meanwhile are dropped
+  async close(timeoutMs: number): Promise<void> {
+    this.closing = true;
+    this.socket.unpipe(this.parser);
+    if (this.socket.closed) {
+      return;
+    }
+
+    const closed = new Promise<void>((resolve) => this.socket.once('close', () => resolve()));
+    const deadline = setTimeout(() => this.socket.destroy(), timeoutMs);
+    await Promise.race([this.idle(), closed]);
+    if (!this.socket.destroyed) {
+      // end() sends the replies still queued; destroy() would discard them
+      this.socket.end(() => this.socket.destroy());
+    }
+    await closed;
+    clearTimeout(deadline);
+  }
+
+  // Resolves once every request received so far has been handled
+  async idle(): Promise<void> {
+    await Promise.allSettled(this.inFlight);
   }
 
   private write(buffer: Buffer): void {
