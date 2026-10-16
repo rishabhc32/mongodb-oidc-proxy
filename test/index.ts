@@ -7,6 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { once } from 'events';
+import { setTimeout } from 'timers/promises';
 
 let hostport: string;
 before(() => {
@@ -128,13 +129,16 @@ describe('bin', function() {
         })
         .filter(Boolean);
 
+    // Poll rather than fs.watch: watch events can be coalesced (e.g. FSEvents
+    // on macOS), so the write carrying the event may never be observed
     const waitForLogEvent = async (filePath: string, evName: string) => {
-      for await (const _ of fs.promises.watch(path.dirname(filePath))) {
+      for (;;) {
         try {
           const content = fs.readFileSync(filePath, 'utf8');
           const event = parseNdjsonLines(content).find((e) => e.ev === evName);
           if (event) return event;
         } catch {}
+        await setTimeout(50);
       }
     };
 
@@ -159,7 +163,7 @@ describe('bin', function() {
     });
 
     afterEach(async () => {
-      await client.close();
+      await client?.close();
       proc.kill();
       await once(proc, 'exit');
       tmpDir[Symbol.dispose]();
