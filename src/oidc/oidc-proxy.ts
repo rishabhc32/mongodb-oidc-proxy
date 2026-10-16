@@ -49,12 +49,15 @@ export class OIDCProxy extends EventEmitter {
   private readonly listenPort: number;
   private readonly listenHost?: string;
 
-  constructor(config: OIDCProxyConfig, jwtValidator?: JWTValidator) {
+  constructor(
+    config: OIDCProxyConfig,
+    jwtValidator = new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience)
+  ) {
     super();
     this.maxConnections = config.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
     this.maxConnectionsPerUser = config.maxConnectionsPerUser;
     this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
-    this.jwtValidator = jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
+    this.jwtValidator = jwtValidator;
     this.messageBuilder = new MessageBuilder();
     this.idpInfo = { issuer: config.issuer, clientId: config.clientId };
     this.listenPort = config.listenPort;
@@ -592,11 +595,11 @@ export class OIDCConnection extends EventEmitter {
     }
 
     // Use OP_REPLY for legacy OP_QUERY, OP_MSG for modern messages
-    const response =
-      msg.contents.opCode === 'OP_QUERY'
-        ? this.messageBuilder.buildOpReply(msg.header.requestID, helloResponse)
-        : this.messageBuilder.buildCommandResponse(msg.header.requestID, helloResponse);
-    this.write(response);
+    if (msg.contents.opCode === 'OP_QUERY') {
+      this.write(this.messageBuilder.buildOpReply(msg.header.requestID, helloResponse));
+    } else {
+      this.write(this.messageBuilder.buildCommandResponse(msg.header.requestID, helloResponse));
+    }
   }
 
   // Swap in a new lease on the user's backend client, releasing the previous one
