@@ -49,15 +49,16 @@ export class OIDCProxy extends EventEmitter {
   private readonly listenPort: number;
   private readonly listenHost?: string;
 
-  constructor(
-    config: OIDCProxyConfig,
-    jwtValidator = new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience)
-  ) {
+  constructor(config: OIDCProxyConfig, jwtValidator?: JWTValidator) {
     super();
     this.maxConnections = config.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
     this.maxConnectionsPerUser = config.maxConnectionsPerUser;
     this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
-    this.jwtValidator = jwtValidator;
+    if (jwtValidator) {
+      this.jwtValidator = jwtValidator;
+    } else {
+      this.jwtValidator = new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
+    }
     this.messageBuilder = new MessageBuilder();
     this.idpInfo = { issuer: config.issuer, clientId: config.clientId };
     this.listenPort = config.listenPort;
