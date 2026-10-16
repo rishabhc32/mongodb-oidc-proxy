@@ -80,10 +80,7 @@ describe('ParseMessage', () => {
     section.writeUInt32LE(4 + seqId.length + 4, 1);
     const emptyDoc = Buffer.alloc(4); // declared size 0
     const body = Buffer.concat([Buffer.alloc(4), section, seqId, emptyDoc]);
-    await assert.rejects(
-      ParseMessage(Buffer.concat([header(16 + body.length, OpCode.OP_MSG), body])),
-      /bson size must be >= 5/
-    );
+    await assert.rejects(ParseMessage(Buffer.concat([header(16 + body.length, OpCode.OP_MSG), body])), /bson size must be >= 5/);
   });
 
   describe('OP_COMPRESSED', () => {

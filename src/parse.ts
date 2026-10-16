@@ -307,10 +307,7 @@ class OpQuery {
   returnFieldsSelector: BSONBuffer | null;
 
   constructor(
-    values: Pick<
-      OpQuery,
-      'fullCollectionName' | 'flags' | 'numberToSkip' | 'numberToReturn' | 'query' | 'returnFieldsSelector'
-    >
+    values: Pick<OpQuery, 'fullCollectionName' | 'flags' | 'numberToSkip' | 'numberToReturn' | 'query' | 'returnFieldsSelector'>
   ) {
     this.fullCollectionName = values.fullCollectionName;
     this.flags = values.flags;
@@ -485,11 +482,7 @@ class OpCompressed {
     this.contents = values.contents;
   }
 
-  static async Read(
-    buf: Uint8Array,
-    length: number,
-    options: ParseOptions
-  ): Promise<{ msg: OpCompressed; readBytes: number }> {
+  static async Read(buf: Uint8Array, length: number, options: ParseOptions): Promise<{ msg: OpCompressed; readBytes: number }> {
     if (options.allowCompressed === false) {
       throw new Error('Compressed messages are not accepted');
     }

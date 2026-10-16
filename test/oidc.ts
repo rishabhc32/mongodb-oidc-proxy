@@ -1136,12 +1136,7 @@ describe('JWTValidator with real keys', function () {
   });
 
   it('validates with audience check', async () => {
-    const validator = new JWTValidator(
-      `http://localhost:${jwksPort}`,
-      'test-client-id',
-      undefined,
-      'https://api.example.com'
-    );
+    const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id', undefined, 'https://api.example.com');
 
     const token = await new SignJWT({
       client_id: 'test-client-id',
@@ -1159,12 +1154,7 @@ describe('JWTValidator with real keys', function () {
   });
 
   it('returns INVALID when audience does not match', async () => {
-    const validator = new JWTValidator(
-      `http://localhost:${jwksPort}`,
-      'test-client-id',
-      undefined,
-      'https://api.example.com'
-    );
+    const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id', undefined, 'https://api.example.com');
 
     const token = await new SignJWT({
       client_id: 'test-client-id',
@@ -2073,9 +2063,7 @@ describe('OIDCProxy with mock validator', function () {
       assert.match(response.errmsg, /not managed by the proxy/);
 
       // Password and roles are untouched
-      const direct = new MongoClient(
-        `mongodb://${encodeURIComponent(user)}:original-password@${hostport}/?authSource=admin`
-      );
+      const direct = new MongoClient(`mongodb://${encodeURIComponent(user)}:original-password@${hostport}/?authSource=admin`);
       await direct.connect();
       await direct.close();
       assert.strictEqual((await getUser(user)).roles.length, 2);

@@ -54,8 +54,7 @@ export class OIDCProxy extends EventEmitter {
     this.maxConnections = config.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
     this.maxConnectionsPerUser = config.maxConnectionsPerUser;
     this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
-    this.jwtValidator =
-      jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
+    this.jwtValidator = jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
     this.messageBuilder = new MessageBuilder();
     this.idpInfo = { issuer: config.issuer, clientId: config.clientId };
     this.listenPort = config.listenPort;
@@ -378,9 +377,7 @@ export class OIDCConnection extends EventEmitter {
     if (received.contents.opCode === 'OP_COMPRESSED') {
       const { compressorId, contents } = received.contents;
       if (contents instanceof Uint8Array) {
-        this.write(
-          this.messageBuilder.buildErrorResponse(received.header.requestID, `Unsupported compressor ${compressorId}`)
-        );
+        this.write(this.messageBuilder.buildErrorResponse(received.header.requestID, `Unsupported compressor ${compressorId}`));
         return;
       }
       msg = new FullMessage(received.header, contents);
@@ -430,11 +427,7 @@ export class OIDCConnection extends EventEmitter {
       }
 
       this.emit('authRequired', cmdName);
-      const response = this.messageBuilder.buildAuthFailureResponse(
-        msg.header.requestID,
-        'Authentication required',
-        13
-      );
+      const response = this.messageBuilder.buildAuthFailureResponse(msg.header.requestID, 'Authentication required', 13);
       this.write(response);
       return;
     }
@@ -502,9 +495,7 @@ export class OIDCConnection extends EventEmitter {
     // Validate JWT
     const result = await this.jwtValidator.validate(jwt);
     if (!result.valid) {
-      this.write(
-        this.messageBuilder.buildAuthFailureResponse(msg.header.requestID, `Authentication failed: ${result.error}`)
-      );
+      this.write(this.messageBuilder.buildAuthFailureResponse(msg.header.requestID, `Authentication failed: ${result.error}`));
       this.emit('authFailed', result?.email, result.error);
       return;
     }
@@ -629,12 +620,7 @@ export class OIDCConnection extends EventEmitter {
     this.replaceLease(undefined);
 
     this.write(
-      this.messageBuilder.buildErrorResponse(
-        requestID,
-        `Reauthentication required: ${reason}`,
-        391,
-        'ReauthenticationRequired'
-      )
+      this.messageBuilder.buildErrorResponse(requestID, `Reauthentication required: ${reason}`, 391, 'ReauthenticationRequired')
     );
     this.emit('reauthRequired', this.email, reason);
   }
