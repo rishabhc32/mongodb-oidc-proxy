@@ -13,6 +13,7 @@ import { Singleflight } from '@src/utils/sync';
 import { randomBytes } from '@src/utils/random';
 import { ksuid } from '@src/utils/ksuid';
 import type { OIDCProxyConfig, IdpInfo } from '@src/oidc/types';
+import type { UserProvisioner, UserClientLease, ProvisionResult } from '@src/oidc/user-provisioner';
 
 const DEFAULT_MAX_CONNECTIONS = 10000;
 const DEFAULT_CONNECTION_TIMEOUT_MS = 120000;
@@ -28,22 +29,9 @@ interface BackendInfo {
   params: URLSearchParams;
 }
 
-// A connection's hold on the backend client shared by all of a user's connections
-export interface UserClientLease {
-  readonly email: string;
-  readonly client: MongoClient;
-  release(): void;
-}
-
 interface UserClientEntry {
   client: Promise<MongoClient>;
   refs: number;
-}
-
-export type ProvisionResult = { lease: UserClientLease } | { error: string };
-
-export interface UserProvisioner {
-  provisionUser(email: string, current: UserClientLease | undefined, debug: (message: string) => void): Promise<ProvisionResult>;
 }
 
 function isManagedUser(user: Document, email: string): boolean {
