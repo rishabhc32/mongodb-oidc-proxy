@@ -324,7 +324,7 @@ export class OIDCConnection extends EventEmitter {
         }
 
         // Authentication successful
-        this.userClient = userClient;
+        this.replaceUserClient(userClient);
         this.authenticated = true;
         this.email = email;
         this.subject = result.subject;
@@ -396,7 +396,7 @@ export class OIDCConnection extends EventEmitter {
     }
 
     // Authentication successful
-    this.userClient = userClient;
+    this.replaceUserClient(userClient);
     this.authenticated = true;
     this.subject = result.subject;
     this.email = email;
@@ -532,9 +532,22 @@ export class OIDCConnection extends EventEmitter {
     this.write(response);
   }
 
+  // Swap in a new per-user backend client, closing the previous one so its
+  // connection pool is not leaked when a connection reauthenticates
+  private replaceUserClient(userClient: MongoClient | undefined): void {
+    const previousClient = this.userClient;
+    this.userClient = userClient;
+    if (previousClient && previousClient !== userClient) {
+      previousClient.close().catch(() => { });
+    }
+  }
+
   private sendReauthRequired(requestID: number, reason: string): void {
     this.authenticated = false;
     this.tokenExp = undefined;
+
+    // Release the user's backend connection; a new one is provisioned on reauth
+    this.replaceUserClient(undefined);
 
     this.write(this.messageBuilder.buildErrorResponse(
       requestID,

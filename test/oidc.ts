@@ -1417,6 +1417,145 @@ describe('OIDCProxy with mock validator', function() {
     });
   });
 
+  describe('backend client lifecycle on reauthentication', () => {
+    const email = 'test-user@example.com';
+
+    before(async () => {
+      const client = new MongoClient(`mongodb://${hostport}`);
+      await client.connect();
+      try {
+        await client.db('admin').command({
+          createRole: email,
+          privileges: [],
+          roles: []
+        });
+      } catch (err: any) {
+        if (err.code !== 11000 && !err.message.includes('already exists')) {
+          throw err;
+        }
+      } finally {
+        await client.close();
+      }
+    });
+
+    const saslStartMsg = (requestId: number) => buildOpMsg({
+      saslStart: 1,
+      mechanism: 'MONGODB-OIDC',
+      payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
+      $db: 'admin'
+    }, requestId);
+
+    it('closes the user backend client when reauthentication is required and provisions a new one', async () => {
+      const mockValidator = new MockJWTValidator({
+        valid: true,
+        subject: email,
+        email: email,
+        exp: Math.floor(Date.now() / 1000) - 10 // Already expired
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+
+      const client = new net.Socket();
+      const reader = new ResponseReader(client);
+      await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
+      const [conn] = await once(proxy, 'newConnection');
+
+      try {
+        client.write(saslStartMsg(1));
+        await reader.read();
+
+        const firstClient = (conn as any).userClient as MongoClient;
+        assert(firstClient, 'expected a backend client after authentication');
+        const closeSpy = sinon.spy(firstClient, 'close');
+
+        // Expired token - command is rejected with ReauthenticationRequired
+        client.write(buildOpMsg({ ping: 1, $db: 'admin' }, 2));
+        const reauthResponse = deserialize((await reader.read()).subarray(21));
+        assert.strictEqual(reauthResponse.code, 391);
+        assert(closeSpy.calledOnce, 'previous backend client should be closed');
+        assert.strictEqual((conn as any).userClient, undefined);
+
+        // Reauthenticate with a fresh token and run a command again
+        (mockValidator as any).mockResult = {
+          valid: true,
+          subject: email,
+          email: email,
+          exp: Math.floor(Date.now() / 1000) + 3600
+        };
+        client.write(saslStartMsg(3));
+        const authResponse = deserialize((await reader.read()).subarray(21));
+        assert.strictEqual(authResponse.ok, 1);
+        assert.strictEqual(authResponse.done, true);
+
+        const secondClient = (conn as any).userClient as MongoClient;
+        assert(secondClient && secondClient !== firstClient, 'expected a new backend client');
+
+        client.write(buildOpMsg({ ping: 1, $db: 'admin' }, 4));
+        const pingResponse = deserialize((await reader.read()).subarray(21));
+        assert.strictEqual(pingResponse.ok, 1);
+      } finally {
+        client.destroy();
+        await proxy.stop();
+      }
+    });
+
+    it('closes the previous backend client when reauthenticating an authenticated connection', async () => {
+      const mockValidator = new MockJWTValidator({
+        valid: true,
+        subject: email,
+        email: email,
+        exp: Math.floor(Date.now() / 1000) + 3600
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+
+      const client = new net.Socket();
+      const reader = new ResponseReader(client);
+      await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
+      const [conn] = await once(proxy, 'newConnection');
+
+      try {
+        client.write(saslStartMsg(1));
+        await reader.read();
+
+        const firstClient = (conn as any).userClient as MongoClient;
+        assert(firstClient, 'expected a backend client after authentication');
+        const closeSpy = sinon.spy(firstClient, 'close');
+
+        client.write(saslStartMsg(2));
+        const authResponse = deserialize((await reader.read()).subarray(21));
+        assert.strictEqual(authResponse.ok, 1);
+
+        const secondClient = (conn as any).userClient as MongoClient;
+        assert(secondClient && secondClient !== firstClient, 'expected a new backend client');
+        assert(closeSpy.calledOnce, 'previous backend client should be closed');
+      } finally {
+        client.destroy();
+        await proxy.stop();
+      }
+    });
+  });
+
   describe('auth failure handling', () => {
     it('returns error when email claim is missing', async () => {
       const mockValidator = new MockJWTValidator({
