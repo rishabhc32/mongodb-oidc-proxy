@@ -1805,30 +1805,82 @@ describe('OIDCProxy with mock validator', function () {
       }
     });
 
-    it('closes the connection on a compressed message without decompressing it', async () => {
-      const proxy = new OIDCProxy(config(), validFor(email));
-      await proxy.start();
-      const { client, conn } = await connect(proxy);
+    describe('message size limit', () => {
+      it('closes a connection that sends a message over 16 KB before login', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const { client, conn } = await connect(proxy);
 
-      try {
-        const parseError = once(conn, 'parseError');
-        const closed = once(client, 'close');
-        const body = Buffer.alloc(9);
-        body.writeInt32LE(2013, 0); // original opcode OP_MSG
-        body.writeInt32LE(0, 4);
-        body.writeUInt8(2, 8); // zlib
-        const header = Buffer.alloc(16);
-        header.writeInt32LE(16 + body.length, 0);
-        header.writeInt32LE(2012, 12); // OP_COMPRESSED
-        client.write(Buffer.concat([header, body]));
+        try {
+          const parseError = once(conn, 'parseError');
+          const closed = once(client, 'close');
+          // Only the header: the proxy must reject the declared length without waiting for the body
+          const header = Buffer.alloc(16);
+          header.writeInt32LE(16385, 0);
+          header.writeInt32LE(2013, 12); // OP_MSG
+          client.write(header);
 
-        const [err] = await parseError;
-        assert.match(err.message, /Compressed messages are not accepted/);
-        await closed;
-      } finally {
-        client.destroy();
-        await proxy.stop();
-      }
+          const [err] = await parseError;
+          assert.match(err.message, /Invalid message length 16385/);
+          await closed;
+        } finally {
+          client.destroy();
+          await proxy.stop();
+        }
+      });
+
+      it('closes a connection whose compressed message would expand past 16 KB before login', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const { client, conn } = await connect(proxy);
+
+        try {
+          const parseError = once(conn, 'parseError');
+          const closed = once(client, 'close');
+          const message = await new MessageBuilder().compress(buildOpMsg({ ping: 1, $db: 'admin' }, 1));
+          message.writeInt32LE(20000, 16 + 4); // declared uncompressed size
+          client.write(message);
+
+          const [err] = await parseError;
+          assert.match(err.message, /Invalid uncompressed message size 20000/);
+          await closed;
+        } finally {
+          client.destroy();
+          await proxy.stop();
+        }
+      });
+
+      it('accepts a small compressed message before login', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const { client } = await connect(proxy);
+        const reader = new ResponseReader(client);
+
+        try {
+          client.write(await new MessageBuilder().compress(buildOpMsg({ hello: 1, $db: 'admin' }, 1)));
+          const reply = deserialize((await reader.read()).subarray(21));
+          assert.strictEqual(reply.ok, 1);
+          assert.deepStrictEqual(reply.saslSupportedMechs, ['MONGODB-OIDC']);
+        } finally {
+          client.destroy();
+          await proxy.stop();
+        }
+      });
+
+      it('accepts messages over 16 KB after login', async () => {
+        const proxy = new OIDCProxy(config(), validFor(email));
+        await proxy.start();
+        const { client, request, login } = await connect(proxy);
+
+        try {
+          await login(1);
+          const response = await request({ ping: 1, comment: 'x'.repeat(20000), $db: 'admin' }, 2);
+          assert.strictEqual(response.ok, 1);
+        } finally {
+          client.destroy();
+          await proxy.stop();
+        }
+      });
     });
 
     describe('compression', () => {

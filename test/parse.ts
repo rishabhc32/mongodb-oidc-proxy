@@ -54,6 +54,10 @@ describe('ParseMessage', () => {
     });
   }
 
+  it('rejects a declared message length above the given limit', async () => {
+    await assert.rejects(ParseMessage(header(16385, OpCode.OP_MSG), 16384), /Invalid message length/);
+  });
+
   it('rejects a declared message length above the maximum message size', async () => {
     await assert.rejects(ParseMessage(header(MAX_MESSAGE_SIZE_BYTES + 1, OpCode.OP_MSG)), /Invalid message length/);
   });
@@ -97,9 +101,9 @@ describe('ParseMessage', () => {
       assert.strictEqual(contents.sections[0].body.data.ping, 1);
     });
 
-    it('rejects compressed messages when not allowed', async () => {
-      const data = opCompressed(OpCode.OP_MSG, original.length, 2, zlib.deflateSync(original));
-      await assert.rejects(ParseMessage(data, false), /not accepted/);
+    it('rejects a message that would decompress past the given limit', async () => {
+      const data = opCompressed(OpCode.OP_MSG, 16384, 2, zlib.deflateSync(Buffer.alloc(16384)));
+      await assert.rejects(ParseMessage(data, 16384), /Invalid uncompressed message size/);
     });
 
     it('rejects nested compressed messages', async () => {

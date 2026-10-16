@@ -40,7 +40,9 @@ All of a user's connections share one backend client. `--max-connections-per-use
 
 ### Compression
 
-Clients can compress traffic to the proxy with zlib, for example `compressors=zlib` in the connection string. The proxy accepts compressed messages only after login, and compresses its reply to each compressed request. To compress traffic between the proxy and MongoDB, add `compressors=zlib` to the backend connection string.
+Clients can compress traffic to the proxy with zlib, for example `compressors=zlib` in the connection string. The proxy compresses its reply to each compressed request. To compress traffic between the proxy and MongoDB, add `compressors=zlib` to the backend connection string.
+
+Like `mongod`, the proxy limits messages to 16 KB until a connection logs in, both as sent and after decompression. After login the limit is 48 MB.
 
 ### Logging
 

@@ -18,6 +18,8 @@ const DEFAULT_CONNECTION_TIMEOUT_MS = 120000;
 const PASSWORD_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 // Fits within the 10 seconds `docker stop` waits before killing the process
 const DEFAULT_DRAIN_TIMEOUT_MS = 5000;
+// mongod's limit for messages sent before login (its preAuthMaximumMessageSizeBytes default)
+const PRE_AUTH_MAX_MESSAGE_SIZE_BYTES = 16384;
 
 // Stored in customData of MongoDB users the proxy creates, so it never resets
 // the password or roles of a user it does not own
@@ -267,7 +269,7 @@ export class OIDCConnection extends EventEmitter {
     this.proxy = proxy;
     this.idpInfo = idpInfo;
     this.parser = new WireProtocolParser();
-    this.parser.allowCompressed = false; // until login, see replaceLease
+    this.parser.maxMessageSize = PRE_AUTH_MAX_MESSAGE_SIZE_BYTES; // until login, see replaceLease
 
     this.setupSocket(timeoutMs);
   }
@@ -616,10 +618,9 @@ export class OIDCConnection extends EventEmitter {
   private replaceLease(lease: UserClientLease | undefined): void {
     const previous = this.lease;
     this.lease = lease;
-    // Decompressing is the cheapest way for a client to use up the proxy's memory,
-    // so only logged-in connections may send compressed messages. Drivers never
-    // compress login messages
-    this.parser.allowCompressed = lease !== undefined;
+    // Like mongod, cap messages at 16 KB until the connection logs in, compressed or not,
+    // so an unauthenticated client can't make the proxy buffer or decompress large messages
+    this.parser.maxMessageSize = lease ? MAX_MESSAGE_SIZE_BYTES : PRE_AUTH_MAX_MESSAGE_SIZE_BYTES;
     if (previous !== lease) {
       previous?.release();
     }

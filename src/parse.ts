@@ -483,12 +483,8 @@ class OpCompressed {
   static async Read(
     buf: Uint8Array,
     length: number,
-    allowCompressed: boolean
+    maxMessageSize: number
   ): Promise<{ msg: OpCompressed; readBytes: number }> {
-    if (!allowCompressed) {
-      throw new Error('Compressed messages are not accepted');
-    }
-
     const dv = new DataView(buf.buffer, buf.byteOffset, length);
     const originalOpcode = dv.getInt32(0, true);
     const uncompressedSize = dv.getInt32(4, true);
@@ -498,7 +494,8 @@ class OpCompressed {
     if (originalOpcode === OpCode.OP_COMPRESSED) {
       throw new Error('Nested compressed messages are not accepted');
     }
-    if (uncompressedSize < 0 || uncompressedSize > MAX_MESSAGE_SIZE_BYTES) {
+    // The decompressed message, header included, must fit the same limit as any other
+    if (uncompressedSize < 0 || 16 + uncompressedSize > maxMessageSize) {
       throw new RangeError(`Invalid uncompressed message size ${uncompressedSize}`);
     }
     let compressorId: string;
@@ -532,7 +529,7 @@ class OpCompressed {
     if (uncompressed === null) {
       contents = compressed;
     } else {
-      contents = (await ReadOpContents(originalOpcode, uncompressed, uncompressed.length, allowCompressed)).msg;
+      contents = (await ReadOpContents(originalOpcode, uncompressed, uncompressed.length, maxMessageSize)).msg;
     }
 
     return {
@@ -609,7 +606,7 @@ async function ReadOpContents(
   opcode: number,
   data: Uint8Array,
   length: number,
-  allowCompressed: boolean
+  maxMessageSize: number
 ): Promise<{ msg: OpContents; readBytes: number }> {
   switch (opcode) {
     case OpCode.OP_MSG:
@@ -629,7 +626,7 @@ async function ReadOpContents(
     case OpCode.OP_KILL_CURSORS:
       return OpKillCursors.Read(data, length);
     case OpCode.OP_COMPRESSED:
-      return OpCompressed.Read(data, length, allowCompressed);
+      return OpCompressed.Read(data, length, maxMessageSize);
     default: {
       return {
         msg: new OpUnknown({ actualOpCode: opcode, body: data.subarray(0, length) }),
@@ -650,10 +647,10 @@ export class FullMessage {
 }
 
 // needBytes is the number of additional bytes required before parsing can continue.
-// With allowCompressed false, OP_COMPRESSED messages are rejected without being decompressed
+// Messages longer than maxMessageSize, or that would decompress past it, are rejected
 export async function ParseMessage(
   data: Uint8Array,
-  allowCompressed = true
+  maxMessageSize = MAX_MESSAGE_SIZE_BYTES
 ): Promise<{ msg: FullMessage; readBytes: number } | { needBytes: number }> {
   if (data.length < 16) {
     return { needBytes: 16 - data.length };
@@ -662,7 +659,7 @@ export async function ParseMessage(
   const { msg: header, readBytes: headerBytes } = await MessageHeader.Read(data);
   // A length below the header size would consume no bytes and re-parse the
   // same data forever; an unbounded one lets a peer exhaust memory
-  if (header.messageLength < headerBytes || header.messageLength > MAX_MESSAGE_SIZE_BYTES) {
+  if (header.messageLength < headerBytes || header.messageLength > maxMessageSize) {
     throw new RangeError(`Invalid message length ${header.messageLength}`);
   }
   if (header.messageLength > data.length) {
@@ -673,7 +670,7 @@ export async function ParseMessage(
       header.opCode,
       data.subarray(headerBytes, header.messageLength),
       header.messageLength - headerBytes,
-      allowCompressed
+      maxMessageSize
     )
   ).msg;
   return {
