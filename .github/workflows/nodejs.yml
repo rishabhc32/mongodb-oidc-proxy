@@ -21,3 +21,27 @@ jobs:
         run: npm install
       - name: Test
         run: npm test
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build proxy image
+        run: docker build -t mongodb-oidc-proxy .
+      - name: Check proxy image starts
+        run: docker run --rm mongodb-oidc-proxy --help
+      - name: Build Vector image
+        run: docker build -t mongodb-oidc-proxy-vector ops/vector
+      - name: Validate and test Vector config
+        run: |
+          mkdir -p "$RUNNER_TEMP/secrets"
+          printf 'ci-key' > "$RUNNER_TEMP/secrets/es_api_key"
+          chmod 644 "$RUNNER_TEMP/secrets/es_api_key"
+          docker run --rm -e ES_ENDPOINT=http://localhost:9200 \
+            -v "$RUNNER_TEMP/secrets:/run/secrets:ro" \
+            mongodb-oidc-proxy-vector validate --skip-healthchecks /etc/vector/vector.yaml
+          docker run --rm -e ES_ENDPOINT=http://localhost:9200 \
+            -v "$RUNNER_TEMP/secrets:/run/secrets:ro" \
+            -v "$PWD/test/vector:/etc/vector/tests:ro" \
+            mongodb-oidc-proxy-vector test /etc/vector/vector.yaml /etc/vector/tests/normalize.test.yaml

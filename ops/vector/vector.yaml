@@ -1,0 +1,92 @@
+# Ships the proxy's NDJSON log file (--log-file) to Elasticsearch.
+#
+# Environment (non-secret values only; see ops/vector/Dockerfile):
+#   ES_ENDPOINT  Elasticsearch URL, e.g. https://es.internal:9200 (required)
+#   ES_INDEX     Write alias to index into (default: mongo-logs)
+#
+# Files:
+#   /var/log/mongodb-wp-proxy/proxy*.log  the proxy's log file and its rotations
+#   /run/secrets/es_api_key               Elasticsearch API key (encoded form)
+#   /var/lib/vector/data                  read checkpoints and disk buffer
+
+data_dir: /var/lib/vector/data
+
+secret:
+  files:
+    type: directory
+    path: /run/secrets
+
+sources:
+  proxy_logs:
+    type: file
+    # winston rotates proxy.log to proxy1.log, proxy2.log, ...; matching the rotated
+    # names lets Vector finish reading a file that was rotated mid-read
+    include:
+      - /var/log/mongodb-wp-proxy/proxy*.log
+    read_from: beginning
+
+transforms:
+  normalize:
+    type: remap
+    inputs: [proxy_logs]
+    drop_on_error: true
+    drop_on_abort: true
+    source: |
+      # Each line is one NDJSON event from the proxy
+      . = object!(parse_json!(.message))
+
+      # Skip records with an empty or missing event type
+      if !is_string(.ev) || .ev == "" {
+        abort
+      }
+
+      # The event time becomes Elasticsearch's @timestamp
+      ts = del(.ts)
+      ."@timestamp" = if is_string(ts) { ts } else { format_timestamp!(now(), "%Y-%m-%dT%H:%M:%S%.3fZ") }
+
+      # Drop tags when empty to avoid placeholder values
+      if .tags == [] {
+        del(.tags)
+      }
+
+      # Keep field types consistent across event types
+      .connId = string(.connId) ?? ""
+      .user = string(.user) ?? ""
+      .db = string(.db) ?? ""
+      .cmd = string(.cmd) ?? ""
+      .error = string(.error) ?? ""
+      .source = string(.source) ?? ""
+      .requestBytes = int(.requestBytes) ?? 0
+      .responseBytes = int(.responseBytes) ?? 0
+      .bytesInTotal = int(.bytesInTotal) ?? 0
+      .bytesOutTotal = int(.bytesOutTotal) ?? 0
+
+      # Elasticsearch would expand a key such as "a.b" (common in update commands)
+      # into nested objects, so replace the dots
+      . = map_keys(., recursive: true) -> |key| { replace(key, ".", "_") }
+
+sinks:
+  elasticsearch:
+    type: elasticsearch
+    inputs: [normalize]
+    endpoints: ["${ES_ENDPOINT}"]
+    # Set explicitly: version detection and the health check need cluster
+    # privileges that the log-writing API key does not have
+    api_version: v8
+    healthcheck:
+      enabled: false
+    mode: bulk
+    bulk:
+      index: "${ES_INDEX:-mongo-logs}"
+      action: create
+    request:
+      headers:
+        Authorization: "ApiKey SECRET[files.es_api_key]"
+    # Checkpoint a log line only once Elasticsearch (or the disk buffer) has it,
+    # and buffer on disk through Elasticsearch outages and restarts
+    acknowledgements:
+      enabled: true
+    buffer:
+      type: disk
+      max_size: 1073741824
+      when_full: block

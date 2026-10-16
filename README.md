@@ -39,6 +39,59 @@ All of a user's connections share one backend client. `--max-connections-per-use
 
 With `--ndjson`, every forwarded command is logged with its user, database, command name and full request (and the response at `--log-level debug`). The `pwd` field of `createUser`/`updateUser` commands is replaced with `[REDACTED]`.
 
+## Running with Docker
+
+Both images run as non-root users. Secrets are mounted as files, so they never appear in the container's environment or in `docker inspect`. Each secret file must be readable by the container's user.
+
+### Proxy
+
+```shell
+docker build -t mongodb-oidc-proxy .
+
+# The proxy runs as uid 1000
+sudo chown 1000 /etc/mongodb-oidc-proxy/secrets/mongo_connection_string
+sudo chmod 400 /etc/mongodb-oidc-proxy/secrets/mongo_connection_string
+
+docker run -d --name mongodb-oidc-proxy \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  -p 127.0.0.1:27018:27018 \
+  -v proxy-logs:/var/log/mongodb-wp-proxy \
+  -v /etc/mongodb-oidc-proxy/secrets/mongo_connection_string:/run/secrets/mongo_connection_string:ro \
+  -e MONGO_CONNECTION_STRING_FILE=/run/secrets/mongo_connection_string \
+  mongodb-oidc-proxy \
+  --ndjson --oidc-mode --issuer <url> --client-id <id> \
+  --log-file /var/log/mongodb-wp-proxy/proxy.log 0.0.0.0:27018
+```
+
+The proxy must listen on `0.0.0.0` inside the container, but it does not serve TLS. Publish the port on `127.0.0.1` (as above) or a private network only.
+
+### Log shipping to Elasticsearch
+
+[Vector](https://vector.dev) tails the proxy's log file from the shared volume and sends each event to Elasticsearch. The config is in `ops/vector/vector.yaml`. First run `setup-elasticsearch.sh` to create the ILM policy, index template and `mongo-logs` write alias. Then create an API key that can write to `mongo-logs*` (see `ops/elasticsearch-role.json`) and save its `encoded` value as the secret:
+
+```shell
+docker build -t mongodb-oidc-proxy-vector ops/vector
+
+# Vector runs as uid 65532
+sudo chown 65532 /etc/mongodb-oidc-proxy/secrets/es_api_key
+sudo chmod 400 /etc/mongodb-oidc-proxy/secrets/es_api_key
+
+docker run -d --name mongodb-oidc-proxy-vector \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  -v proxy-logs:/var/log/mongodb-wp-proxy:ro \
+  -v vector-data:/var/lib/vector/data \
+  -v /etc/mongodb-oidc-proxy/secrets/es_api_key:/run/secrets/es_api_key:ro \
+  -e ES_ENDPOINT=https://es.internal:9200 \
+  mongodb-oidc-proxy-vector
+```
+
+- `vector-data` holds Vector's read checkpoints and its disk buffer. Keep this volume so restarts don't re-send logs, and so events queued during an Elasticsearch outage aren't lost.
+- `ES_INDEX` overrides the write alias (default `mongo-logs`).
+- The Elasticsearch certificate is verified against the image's CA bundle. For a private CA, mount a bundle that includes it and set `SSL_CERT_FILE` to its path.
+- Import `ops/mongo-logs-kibana-dashboard.ndjson` into Kibana (Stack Management → Saved Objects).
+
+The transform has unit tests: `vector test ops/vector/vector.yaml test/vector/normalize.test.yaml`.
+
 ## LICENSE
 
 Apache-2.0
