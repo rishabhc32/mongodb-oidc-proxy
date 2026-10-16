@@ -1466,6 +1466,7 @@ describe('OIDCProxy with mock validator', function () {
 
   describe('backend client lifecycle', () => {
     const email = 'test-user@example.com';
+    const otherEmail = 'other-user@example.com';
 
     const config = (overrides: Partial<OIDCProxyConfig> = {}): OIDCProxyConfig => ({
       issuer: 'https://example.com',
@@ -1514,17 +1515,60 @@ describe('OIDCProxy with mock validator', function () {
       const client = new MongoClient(`mongodb://${hostport}`);
       await client.connect();
       try {
-        await client.db('admin').command({
-          createRole: email,
-          privileges: [],
-          roles: []
-        });
-      } catch (err: any) {
-        if (err.code !== 11000 && !err.message.includes('already exists')) {
-          throw err;
+        for (const role of [email, otherEmail]) {
+          await client
+            .db('admin')
+            .command({ createRole: role, privileges: [], roles: [] })
+            .catch((err) => {
+              if (err.code !== 11000 && !err.message.includes('already exists')) {
+                throw err;
+              }
+            });
         }
       } finally {
         await client.close();
+      }
+    });
+
+    it('logs a command as the user who sent it when the connection reauthenticates as another user', async () => {
+      const mockValidator = validFor(email);
+      const proxy = new OIDCProxy(config(), mockValidator);
+      await proxy.start();
+      const { client, conn, login } = await connect(proxy);
+
+      try {
+        await login(1);
+
+        // Hold the first user's command until the connection has switched users
+        let finishCommand!: () => void;
+        const held = new Promise<void>((resolve) => {
+          finishCommand = resolve;
+        });
+        const dbStub = sinon.stub(conn.lease.client as MongoClient, 'db').returns({
+          command: async () => {
+            await held;
+            return { ok: 1 };
+          }
+        } as any);
+        const forwarded = once(conn, 'commandForwarded');
+        client.write(buildOpMsg({ ping: 1, $db: 'admin' }, 2));
+        await waitFor(() => dbStub.called);
+
+        (mockValidator as any).mockResult = {
+          valid: true,
+          subject: otherEmail,
+          email: otherEmail,
+          exp: Math.floor(Date.now() / 1000) + 3600
+        };
+        assert.strictEqual((await login(3)).ok, 1);
+        assert.strictEqual(conn.lease.email, otherEmail);
+
+        finishCommand();
+        const [user] = await forwarded;
+        assert.strictEqual(user, email);
+      } finally {
+        client.destroy();
+        await proxy.stop();
       }
     });
 
@@ -1826,7 +1870,7 @@ describe('OIDCProxy with mock validator', function () {
 
     after(async () => {
       const adminDb = adminClient.db('admin');
-      for (const name of ['unmanaged@example.com', 'legacy@example.com', 'fresh@example.com']) {
+      for (const name of ['unmanaged@example.com', 'legacy@example.com', 'migrated@example.com', 'fresh@example.com']) {
         await adminDb.command({ dropUser: name }).catch(() => {});
         await adminDb.command({ dropRole: name }).catch(() => {});
       }
@@ -1866,15 +1910,31 @@ describe('OIDCProxy with mock validator', function () {
       assert.strictEqual((await getUser(user)).roles.length, 2);
     });
 
-    it('adopts users created by earlier versions of the proxy', async () => {
+    it('refuses an unmarked user even when its only role is the email role', async () => {
       const user = 'legacy@example.com';
       const adminDb = adminClient.db('admin');
       await adminDb.command({ createRole: user, privileges: [], roles: [] });
       await adminDb.command({ createUser: user, pwd: 'old-password', roles: [{ role: user, db: 'admin' }] });
 
       const response = await loginAs(user);
+      assert.strictEqual(response.ok, 0);
+      assert.match(response.errmsg, /not managed by the proxy/);
+      assert.strictEqual((await getUser(user)).customData, undefined);
+    });
+
+    it('logs in a user marked as managed by the migration', async () => {
+      const user = 'migrated@example.com';
+      const adminDb = adminClient.db('admin');
+      await adminDb.command({ createRole: user, privileges: [], roles: [] });
+      await adminDb.command({
+        createUser: user,
+        pwd: 'old-password',
+        roles: [{ role: user, db: 'admin' }],
+        customData: { managedBy: 'mongodb-oidc-proxy' }
+      });
+
+      const response = await loginAs(user);
       assert.strictEqual(response.ok, 1);
-      assert.deepStrictEqual((await getUser(user)).customData, { managedBy: 'mongodb-oidc-proxy' });
     });
 
     it('marks the users it creates', async () => {

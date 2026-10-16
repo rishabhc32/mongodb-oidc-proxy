@@ -29,18 +29,10 @@ interface BackendInfo {
   params: URLSearchParams;
 }
 
-function isManagedUser(user: Document, email: string): boolean {
-  if (user.customData?.managedBy === MANAGED_USER_MARKER) {
-    return true;
-  }
-  // Users provisioned before the marker existed carry exactly the proxy's role
-  return (
-    user.customData === undefined &&
-    Array.isArray(user.roles) &&
-    user.roles.length === 1 &&
-    user.roles[0].role === email &&
-    user.roles[0].db === 'admin'
-  );
+// True if the proxy created this user, so it may reset the user's password and roles.
+// Users created before the marker existed are marked by ops/mark-managed-users.js
+function isManagedUser(user: Document): boolean {
+  return user.customData?.managedBy === MANAGED_USER_MARKER;
 }
 
 export class OIDCProxy extends EventEmitter implements UserProvisioner {
@@ -152,7 +144,7 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
 
     const usersInfo = await adminDb.command({ usersInfo: { user: email, db: 'admin' } });
     const user = usersInfo.users?.[0];
-    if (user && !isManagedUser(user, email)) {
+    if (user && !isManagedUser(user)) {
       return `User '${email}' exists and is not managed by the proxy`;
     }
 
@@ -602,6 +594,15 @@ export class OIDCConnection extends EventEmitter {
   }
 
   private async forwardCommand(msg: FullMessage): Promise<void> {
+    // Capture the lease before any await: the connection can reauthenticate as
+    // another user while this command runs, and the command must run and be
+    // logged as the user who sent it
+    const lease = this.lease;
+    if (!lease) {
+      this.write(this.messageBuilder.buildAuthFailureResponse(msg.header.requestID, 'Authentication required', 13));
+      return;
+    }
+
     const dbName = getCommandDb(msg) || 'admin';
     const body = getCommandBody(msg);
     const cmdName = this.getCommandName(body);
@@ -625,8 +626,7 @@ export class OIDCConnection extends EventEmitter {
 
     try {
       // Use the user's own backend client
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const result = await this.lease!.client.db(dbName).command(command as Document);
+      const result = await lease.client.db(dbName).command(command as Document);
 
       // Ensure cursor.id is a proper BSON Long type for mongosh compatibility
       if (result.cursor && result.cursor.id !== undefined) {
@@ -643,12 +643,12 @@ export class OIDCConnection extends EventEmitter {
 
       const requestBytes = msg.header?.messageLength ?? 0;
       const responseBytes = response.length;
-      this.emit('commandForwarded', this.email, dbName, cmdName, command, result, requestBytes, responseBytes);
+      this.emit('commandForwarded', lease.email, dbName, cmdName, command, result, requestBytes, responseBytes);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       const response = this.messageBuilder.buildErrorResponse(msg.header.requestID, errorMessage);
       this.write(response);
-      this.emit('commandError', this.email, errorMessage, dbName, cmdName, command);
+      this.emit('commandError', lease.email, errorMessage, dbName, cmdName, command);
     }
   }
 }
