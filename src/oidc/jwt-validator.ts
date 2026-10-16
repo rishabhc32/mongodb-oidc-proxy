@@ -6,10 +6,6 @@ export enum JWTValidationError {
   INVALID = 'invalid'
 }
 
-// One "@" with non-empty local and domain parts, no whitespace or control characters
-const EMAIL_PATTERN = /^[^\s@\p{Cc}]+@[^\s@\p{Cc}]+$/u;
-const MAX_EMAIL_LENGTH = 254;
-
 export interface JWTValidationResult {
   valid: boolean;
   payload?: JWTPayload;
@@ -55,8 +51,7 @@ export class JWTValidator {
         };
       }
 
-      // Verify email exists. It becomes the MongoDB user and role name, so
-      // anything that is not a plain email address is rejected outright
+      // Verify email exists. It becomes the MongoDB user and role name
       const email = (payload as Record<string, unknown>).email;
       if (email === undefined || email === null || email === '') {
         return {
@@ -65,11 +60,11 @@ export class JWTValidator {
           error: 'Email claim is required in JWT'
         };
       }
-      if (typeof email !== 'string' || email.length > MAX_EMAIL_LENGTH || !EMAIL_PATTERN.test(email)) {
+      if (typeof email !== 'string') {
         return {
           valid: false,
           errorCode: JWTValidationError.INVALID,
-          error: 'Email claim is not a valid email address'
+          error: 'Email claim must be a string'
         };
       }
 

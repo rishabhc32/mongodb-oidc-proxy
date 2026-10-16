@@ -1020,21 +1020,15 @@ describe('JWTValidator with real keys', function () {
     assert.strictEqual(result.error, 'Email claim is required in JWT');
   });
 
-  for (const [label, email] of [
-    ['is not a string', { user: 'root' }],
-    ['has no @', 'root'],
-    ['contains whitespace', 'a b@example.com']
-  ] as const) {
-    it(`returns INVALID when the email claim ${label}`, async () => {
-      const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
-      const token = await createSignedJWT({ client_id: 'test-client-id', email });
+  it('returns INVALID when the email claim is not a string', async () => {
+    const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');
+    const token = await createSignedJWT({ client_id: 'test-client-id', email: { role: 'root', db: 'admin' } });
 
-      const result = await validator.validate(token);
-      assert.strictEqual(result.valid, false);
-      assert.strictEqual(result.errorCode, JWTValidationError.INVALID);
-      assert.strictEqual(result.error, 'Email claim is not a valid email address');
-    });
-  }
+    const result = await validator.validate(token);
+    assert.strictEqual(result.valid, false);
+    assert.strictEqual(result.errorCode, JWTValidationError.INVALID);
+    assert.strictEqual(result.error, 'Email claim must be a string');
+  });
 
   it('returns INVALID when email_verified is false', async () => {
     const validator = new JWTValidator(`http://localhost:${jwksPort}`, 'test-client-id');

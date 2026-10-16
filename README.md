@@ -27,7 +27,7 @@ The connection string can also be passed in the `MONGO_CONNECTION_STRING` enviro
 A client logs in with the `MONGODB-OIDC` mechanism. The proxy accepts its token only if:
 
 - it is signed by the issuer's keys and carries `iss` (matching `--issuer`), `exp`, and `client_id` (matching `--client-id`), plus `aud` when `--audience` is set
-- its `email` claim is a plain email address, and `email_verified` is not `false` (tokens without `email_verified` are accepted)
+- it has a string `email` claim, and `email_verified` is not `false` (tokens without `email_verified` are accepted)
 
 The email is then authorized against MongoDB:
 
