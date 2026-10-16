@@ -30,11 +30,6 @@ interface BackendInfo {
   params: URLSearchParams;
 }
 
-// True if the proxy created this user, so it may reset the user's password and roles
-function isManagedUser(user: Document): boolean {
-  return user.customData?.managedBy === MANAGED_USER_MARKER;
-}
-
 export class OIDCProxy extends EventEmitter implements UserProvisioner {
   private readonly server: Server;
   private readonly backendClient: MongoClient;
@@ -148,7 +143,7 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
 
     const usersInfo = await adminDb.command({ usersInfo: { user: email, db: 'admin' } });
     const user = usersInfo.users?.[0];
-    if (user && !isManagedUser(user)) {
+    if (user && user.customData?.managedBy !== MANAGED_USER_MARKER) {
       return `User '${email}' exists and is not managed by the proxy`;
     }
 
