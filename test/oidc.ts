@@ -3,6 +3,7 @@ import { deserialize, serialize, Binary } from 'bson';
 import net from 'net';
 import http from 'http';
 import { once } from 'events';
+import { setTimeout } from 'timers/promises';
 import { MongoClient } from 'mongodb';
 import { MessageBuilder, OIDCProxy, JWTValidator, JWTValidationError } from '@src/oidc';
 import type { OIDCProxyConfig, JWTValidationResult } from '@src/oidc';
@@ -1417,7 +1418,7 @@ describe('OIDCProxy with mock validator', function() {
     });
   });
 
-  describe('backend client lifecycle on reauthentication', () => {
+  describe('backend client lifecycle', () => {
     const email = 'test-user@example.com';
 
     before(async () => {
@@ -1551,6 +1552,64 @@ describe('OIDCProxy with mock validator', function() {
         assert(closeSpy.calledOnce, 'previous backend client should be closed');
       } finally {
         client.destroy();
+        await proxy.stop();
+      }
+    });
+
+    it('closes a backend client provisioned after the client disconnected', async () => {
+      const client = new net.Socket();
+      let conn: any;
+
+      // Disconnect once the JWT arrives, so provisioning finishes after the
+      // connection's close handler has already run
+      const mockValidator = new MockJWTValidator({
+        valid: true,
+        subject: email,
+        email: email,
+        exp: Math.floor(Date.now() / 1000) + 3600
+      });
+      const validate = mockValidator.validate.bind(mockValidator);
+      sinon.stub(mockValidator, 'validate').callsFake(async (token: string) => {
+        const closed = once(conn, 'connectionClosed');
+        client.destroy();
+        await closed;
+        return validate(token);
+      });
+
+      const config: OIDCProxyConfig = {
+        issuer: 'https://example.com',
+        clientId: 'test-client',
+        connectionString: `mongodb://${hostport}`,
+        listenPort: 0
+      };
+
+      const proxy = new OIDCProxy(config, mockValidator);
+      await proxy.start();
+
+      const addr = proxy.address() as net.AddressInfo;
+
+      const connectSpy = sinon.spy(MongoClient.prototype, 'connect');
+      const closeSpy = sinon.spy(MongoClient.prototype, 'close');
+
+      try {
+        const newConnection = once(proxy, 'newConnection');
+        await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
+        [conn] = await newConnection;
+
+        client.write(saslStartMsg(1));
+
+        const provisioned = (): MongoClient | undefined => connectSpy.thisValues[0];
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !(provisioned() && closeSpy.calledOn(provisioned()))) {
+          await setTimeout(50);
+        }
+
+        assert(provisioned(), 'expected a backend client to be provisioned');
+        assert(closeSpy.calledOn(provisioned()), 'backend client provisioned after disconnect should be closed');
+        assert.strictEqual(conn.userClient, undefined);
+      } finally {
+        connectSpy.restore();
+        closeSpy.restore();
         await proxy.stop();
       }
     });

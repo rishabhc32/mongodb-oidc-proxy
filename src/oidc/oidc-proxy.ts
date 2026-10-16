@@ -471,9 +471,18 @@ export class OIDCConnection extends EventEmitter {
     }
 
     const { protocol, host, params } = this.backendInfo;
-    return new MongoClient(
+    const userClient = await new MongoClient(
       `${protocol}//${encodeURIComponent(value.username)}:${encodeURIComponent(value.password)}@${host}/?${params.toString()}`
     ).connect();
+
+    // The client may have disconnected while the user was being provisioned.
+    // The socket close handler has already run, so nothing else would close this
+    if (this.socket.destroyed) {
+      userClient.close().catch(() => { });
+      return null;
+    }
+
+    return userClient;
   }
 
   private extractJwtFromPayload(payload?: Uint8Array): string | null {
