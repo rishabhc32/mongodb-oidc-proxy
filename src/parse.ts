@@ -531,11 +531,6 @@ class OpCompressed {
       uncompressed = compressed;
     } else if (compressorId === 'zlib') {
       uncompressed = await promisify(zlib.inflate)(compressed, { maxOutputLength: Math.max(uncompressedSize, 1) });
-      if (uncompressed.length !== uncompressedSize) {
-        throw new RangeError(
-          `Uncompressed size ${uncompressed.length} does not match declared size ${uncompressedSize}`
-        );
-      }
     }
 
     let contents: OpContents | Uint8Array;
