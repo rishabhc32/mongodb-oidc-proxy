@@ -49,6 +49,7 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
+    "@mongodb-js/mongodb-runner": "^8.4.2",
     "@types/mocha": "^8.0.3",
     "@types/node": "^25.3.3",
     "@types/sinon": "^10.0.20",
@@ -63,12 +64,16 @@
     "eslint-plugin-standard": "^4.0.1",
     "gen-esm-wrapper": "^1.1.0",
     "mocha": "^11.7.5",
-    "mongodb-runner": "^5.9.2",
-    "nyc": "^15.1.0",
+    "nyc": "^18.0.0",
     "sinon": "^17.0.1",
     "ts-node": "^10.9.2",
     "tsc-alias": "^1.8.12",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.2"
+  },
+  "overrides": {
+    "mocha": {
+      "serialize-javascript": "^7.0.5"
+    }
   }
 }
