@@ -1,5 +1,5 @@
 import assert from 'assert';
-import { parseArgs, parseAddress } from '@src/cli';
+import { parseArgs, parseAddress, redactPasswords } from '@src/cli';
 
 describe('cli parseArgs', () => {
   it('parses --help flag', () => {
@@ -108,6 +108,18 @@ describe('cli parseArgs', () => {
     assert.strictEqual(args.logFile, '/var/log/proxy.log');
   });
 
+  it('parses --max-connections-per-user', () => {
+    const args = parseArgs(['node', 'cli.ts', '--max-connections-per-user', '25']);
+    assert.strictEqual(args.maxConnectionsPerUser, 25);
+  });
+
+  it('ignores a non-positive --max-connections-per-user', () => {
+    for (const value of ['0', '-1', '2.5', 'abc']) {
+      const args = parseArgs(['node', 'cli.ts', '--max-connections-per-user', value]);
+      assert.strictEqual(args.maxConnectionsPerUser, undefined, value);
+    }
+  });
+
   it('handles missing value for --log-file at end', () => {
     const args = parseArgs(['node', 'cli.ts', '--log-file']);
     assert.strictEqual(args.logFile, undefined);
@@ -138,6 +150,20 @@ describe('cli parseArgs', () => {
     assert.strictEqual(args.logFile, undefined);
     assert.deepStrictEqual(args.tags, []);
     assert.deepStrictEqual(args.positional, []);
+  });
+});
+
+describe('cli redactPasswords', () => {
+  it('redacts pwd and keeps every other field', () => {
+    const request = { createUser: 'alice', pwd: 'secret', roles: ['read'] };
+    assert.deepStrictEqual(redactPasswords(request), { createUser: 'alice', pwd: '[REDACTED]', roles: ['read'] });
+    assert.strictEqual(request.pwd, 'secret'); // input is not mutated
+  });
+
+  it('returns requests without pwd unchanged', () => {
+    const request = { find: 'users', filter: { name: 'alice' } };
+    assert.strictEqual(redactPasswords(request), request);
+    assert.strictEqual(redactPasswords(undefined), undefined);
   });
 });
 

@@ -6,6 +6,10 @@ export enum JWTValidationError {
   INVALID = 'invalid'
 }
 
+// One "@" with non-empty local and domain parts, no whitespace or control characters
+const EMAIL_PATTERN = /^[^\s@\p{Cc}]+@[^\s@\p{Cc}]+$/u;
+const MAX_EMAIL_LENGTH = 254;
+
 export interface JWTValidationResult {
   valid: boolean;
   payload?: JWTPayload;
@@ -36,7 +40,9 @@ export class JWTValidator {
     try {
       const { payload } = await jwtVerify(token, this.jwks, {
         issuer: this.issuer,
-        audience: this.audience
+        audience: this.audience,
+        // Without exp a token, and every session built on it, never expires
+        requiredClaims: ['exp']
       });
 
       // Verify client_id
@@ -49,13 +55,31 @@ export class JWTValidator {
         };
       }
 
-      // Verify email exists
-      const email = (payload as Record<string, unknown>).email as string | undefined;
-      if (!email) {
+      // Verify email exists. It becomes the MongoDB user and role name, so
+      // anything that is not a plain email address is rejected outright
+      const email = (payload as Record<string, unknown>).email;
+      if (email === undefined || email === null || email === '') {
         return {
           valid: false,
           errorCode: JWTValidationError.INVALID,
           error: 'Email claim is required in JWT'
+        };
+      }
+      if (typeof email !== 'string' || email.length > MAX_EMAIL_LENGTH || !EMAIL_PATTERN.test(email)) {
+        return {
+          valid: false,
+          errorCode: JWTValidationError.INVALID,
+          error: 'Email claim is not a valid email address'
+        };
+      }
+
+      // Reject emails the IdP has marked unverified; some IdPs omit the claim
+      const emailVerified = (payload as Record<string, unknown>).email_verified;
+      if (emailVerified !== undefined && emailVerified !== true && emailVerified !== 'true') {
+        return {
+          valid: false,
+          errorCode: JWTValidationError.INVALID,
+          error: 'Email claim is not verified'
         };
       }
 

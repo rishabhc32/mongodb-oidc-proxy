@@ -8,6 +8,8 @@ User=mongodb-wp-proxy
 Group=mongodb-wp-proxy
 WorkingDirectory=/etc/mongodb-wp-proxy
 EnvironmentFile=/etc/mongodb-wp-proxy/.env
+# Log files are created 0640 so other local users cannot read logged commands
+UMask=0027
 ExecStart=/usr/bin/node bin/mongodb-wp-proxy.js --ndjson --oidc-mode \
   --issuer "${OIDC_ISSUER}" \
   --client-id "${OIDC_CLIENT_ID}" \

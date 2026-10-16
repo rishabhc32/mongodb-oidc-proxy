@@ -6,7 +6,7 @@ import { MongoClient, Document } from 'mongodb';
 import { deserialize, Long } from 'bson';
 import { LRUCache } from 'lru-cache';
 import { WireProtocolParser } from '@src/parse-stream';
-import { FullMessage, getSaslCommand, getCommandDb, getCommandBody } from '@src/parse';
+import { FullMessage, MAX_MESSAGE_SIZE_BYTES, getSaslCommand, getCommandDb, getCommandBody } from '@src/parse';
 import { JWTValidator, JWTValidationError } from '@src/oidc/jwt-validator';
 import { MessageBuilder } from '@src/oidc/message-builder';
 import { Singleflight } from '@src/utils/sync';
@@ -18,19 +18,53 @@ const DEFAULT_MAX_CONNECTIONS = 10000;
 const DEFAULT_CONNECTION_TIMEOUT_MS = 120000;
 const PASSWORD_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
+// Stored in customData of MongoDB users the proxy creates, so it never resets
+// the password or roles of a user it does not own
+const MANAGED_USER_MARKER = 'mongodb-oidc-proxy';
+
 interface BackendInfo {
   protocol: string;
   host: string;
   params: URLSearchParams;
 }
 
-export class OIDCProxy extends EventEmitter {
+// A connection's hold on the backend client shared by all of a user's connections
+export interface UserClientLease {
+  readonly email: string;
+  readonly client: MongoClient;
+  release(): void;
+}
+
+interface UserClientEntry {
+  client: Promise<MongoClient>;
+  refs: number;
+}
+
+export type ProvisionResult = { lease: UserClientLease } | { error: string };
+
+export interface UserProvisioner {
+  provisionUser(email: string, current: UserClientLease | undefined, debug: (message: string) => void): Promise<ProvisionResult>;
+}
+
+function isManagedUser(user: Document, email: string): boolean {
+  if (user.customData?.managedBy === MANAGED_USER_MARKER) {
+    return true;
+  }
+  // Users provisioned before the marker existed carry exactly the proxy's role
+  return user.customData === undefined &&
+    Array.isArray(user.roles) && user.roles.length === 1 &&
+    user.roles[0].role === email && user.roles[0].db === 'admin';
+}
+
+export class OIDCProxy extends EventEmitter implements UserProvisioner {
   private server: Server;
   private backendClient: MongoClient;
   private jwtValidator: JWTValidator;
   private messageBuilder: MessageBuilder;
   private connections: Map<string, OIDCConnection> = new Map();
+  private userClients: Map<string, UserClientEntry> = new Map();
   private maxConnections: number;
+  private maxConnectionsPerUser?: number;
   private connectionTimeoutMs: number;
   private backendInfo: BackendInfo;
   private singleflight = new Singleflight();
@@ -46,6 +80,7 @@ export class OIDCProxy extends EventEmitter {
   constructor(config: OIDCProxyConfig, jwtValidator?: JWTValidator) {
     super();
     this.maxConnections = config.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    this.maxConnectionsPerUser = config.maxConnectionsPerUser;
     this.connectionTimeoutMs = config.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
     this.jwtValidator = jwtValidator ?? new JWTValidator(config.issuer, config.clientId, config.jwksUri, config.audience);
     this.messageBuilder = new MessageBuilder();
@@ -85,15 +120,147 @@ export class OIDCProxy extends EventEmitter {
       conn.emit('connectionClosed');
     }
 
+    const userClients = [...this.userClients.values()].map(entry => entry.client.then(client => client.close()));
+    this.userClients.clear();
+
     const closeServer = promisify(this.server.close.bind(this.server));
     await Promise.allSettled([
       closeServer(),
-      this.backendClient.close()
+      this.backendClient.close(),
+      ...userClients
     ]);
   }
 
   address(): AddressInfo | string | null {
     return this.server.address();
+  }
+
+  // Authorizes the user and leases the backend client shared by their connections.
+  // `current` is the lease the calling connection already holds, if any
+  async provisionUser(email: string, current: UserClientLease | undefined, debug: (message: string) => void): Promise<ProvisionResult> {
+    debug(`Checking roles for ${email}...`);
+    const error = await this.authorizeUser(email);
+    if (error) {
+      return { error };
+    }
+
+    // Reauthenticating as the same user swaps one lease for another
+    const held = current?.email === email ? 1 : 0;
+    const entry = this.userClients.get(email);
+    if (this.maxConnectionsPerUser !== undefined && entry && entry.refs - held >= this.maxConnectionsPerUser) {
+      return { error: `Too many connections for user '${email}'` };
+    }
+
+    return { lease: await this.acquireUserClient(email, debug) };
+  }
+
+  private async authorizeUser(email: string): Promise<string | null> {
+    const adminDb = this.backendClient.db('admin');
+
+    // Built-in roles (root, readWriteAnyDatabase, ...) are never granted from a token
+    const rolesInfo = await adminDb.command({ rolesInfo: { role: email, db: 'admin' } });
+    const role = rolesInfo.roles?.[0];
+    if (!role || role.isBuiltin) {
+      return `Role '${email}' not defined`;
+    }
+
+    const usersInfo = await adminDb.command({ usersInfo: { user: email, db: 'admin' } });
+    const user = usersInfo.users?.[0];
+    if (user && !isManagedUser(user, email)) {
+      return `User '${email}' exists and is not managed by the proxy`;
+    }
+
+    return null;
+  }
+
+  private async acquireUserClient(email: string, debug: (message: string) => void): Promise<UserClientLease> {
+    let entry = this.userClients.get(email);
+    if (!entry) {
+      const created: UserClientEntry = { client: this.connectUserClient(email, debug), refs: 0 };
+      created.client.catch(() => {
+        if (this.userClients.get(email) === created) {
+          this.userClients.delete(email);
+        }
+      });
+      this.userClients.set(email, created);
+      entry = created;
+    }
+
+    // Counted before awaiting, so concurrent logins see each other
+    const acquired = entry;
+    acquired.refs++;
+
+    let client: MongoClient;
+    try {
+      client = await acquired.client;
+    } catch (err) {
+      acquired.refs--;
+      throw err;
+    }
+
+    let released = false;
+    return {
+      email,
+      client,
+      release: () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        if (--acquired.refs === 0) {
+          if (this.userClients.get(email) === acquired) {
+            this.userClients.delete(email);
+          }
+          client.close().catch(() => { });
+        }
+      }
+    };
+  }
+
+  private async connectUserClient(email: string, debug: (message: string) => void): Promise<MongoClient> {
+    const password = await this.ensureUserPassword(email, debug);
+    const { protocol, host, params } = this.backendInfo;
+    return new MongoClient(
+      `${protocol}//${encodeURIComponent(email)}:${encodeURIComponent(password)}@${host}/?${params.toString()}`
+    ).connect();
+  }
+
+  private async ensureUserPassword(email: string, debug: (message: string) => void): Promise<string> {
+    const cachedPassword = this.userPasswordCache.get(email);
+    if (cachedPassword) {
+      debug(`User found in cache ${email}`);
+      return cachedPassword;
+    }
+
+    const { value } = await this.singleflight.do(email, async () => {
+      const adminDb = this.backendClient.db('admin');
+
+      // Create/Update user with random password
+      const password = randomBytes(32).toString('base64');
+      const user = {
+        pwd: password,
+        roles: [{ role: email, db: 'admin' }],
+        customData: { managedBy: MANAGED_USER_MARKER }
+      };
+
+      try {
+        await adminDb.command({ updateUser: email, ...user });
+        debug(`Updated user ${email}`);
+      } catch (err: any) {
+        if (err.codeName === 'UserNotFound') {
+          await adminDb.command({ createUser: email, ...user });
+          debug(`Created user ${email}`);
+        } else {
+          throw err;
+        }
+      }
+
+      // Set the new password in the cache
+      this.userPasswordCache.set(email, password);
+      return password;
+    });
+
+    return value;
   }
 
   private handleConnection(socket: Socket): void {
@@ -111,12 +278,9 @@ export class OIDCProxy extends EventEmitter {
       remoteAddr,
       socket,
       this.connectionTimeoutMs,
-      this.backendClient,
       this.jwtValidator,
       this.messageBuilder,
-      this.userPasswordCache,
-      this.singleflight,
-      this.backendInfo,
+      this,
       this.idpInfo
     );
 
@@ -138,18 +302,15 @@ export class OIDCConnection extends EventEmitter {
 
   private socket: Socket;
   private parser: WireProtocolParser;
-  private userClient?: MongoClient;
+  private lease?: UserClientLease;
   private conversationId = 0;
   private authenticated = false;
   private subject?: string;
   private email?: string;
   private tokenExp?: number;
-  private backendClient: MongoClient;
   private jwtValidator: JWTValidator;
   private messageBuilder: MessageBuilder;
-  private userPasswordCache: LRUCache<string, string>;
-  private singleflight: Singleflight;
-  private backendInfo: BackendInfo;
+  private provisioner: UserProvisioner;
   private idpInfo: IdpInfo;
 
   constructor(
@@ -157,12 +318,9 @@ export class OIDCConnection extends EventEmitter {
     incoming: string,
     socket: Socket,
     timeoutMs: number,
-    backendClient: MongoClient,
     jwtValidator: JWTValidator,
     messageBuilder: MessageBuilder,
-    userPasswordCache: LRUCache<string, string>,
-    singleflight: Singleflight,
-    backendInfo: BackendInfo,
+    provisioner: UserProvisioner,
     idpInfo: IdpInfo
   ) {
     super();
@@ -171,14 +329,12 @@ export class OIDCConnection extends EventEmitter {
     this.bytesIn = 0;
     this.bytesOut = 0;
     this.socket = socket;
-    this.backendClient = backendClient;
     this.jwtValidator = jwtValidator;
     this.messageBuilder = messageBuilder;
-    this.userPasswordCache = userPasswordCache;
-    this.singleflight = singleflight;
-    this.backendInfo = backendInfo;
+    this.provisioner = provisioner;
     this.idpInfo = idpInfo;
-    this.parser = new WireProtocolParser();
+    // Compression is never advertised, and decompressing before auth is a DoS vector
+    this.parser = new WireProtocolParser({ allowCompressed: false });
 
     this.setupSocket(timeoutMs);
   }
@@ -203,23 +359,26 @@ export class OIDCConnection extends EventEmitter {
     });
 
     this.parser.on('message', (msg: FullMessage) => {
-      this.handleMessage(msg).catch(err => {
-        this.emit('error', err);
+      this.handleMessage(msg).catch((err: Error) => {
+        // Fail only this request; an unhandled 'error' event would crash the proxy.
+        // Details go to the log, not to the (possibly unauthenticated) client
+        this.emit('connectionError', err);
+        this.write(this.messageBuilder.buildErrorResponse(msg.header.requestID, 'Internal proxy error'));
       });
     });
 
+    // A malformed message leaves the stream unparseable, so drop the connection
     this.parser.on('error', (err: Error) => {
       this.emit('parseError', err);
+      this.socket.destroy();
     });
 
     this.socket.pipe(this.parser);
 
     // Clean up on socket close
-    this.socket.on('close', async () => {
+    this.socket.on('close', () => {
       this.emit('connectionClosed');
-      if (this.userClient) {
-        await this.userClient.close().catch(() => { });
-      }
+      this.replaceLease(undefined);
       this.parser.destroy();
     });
 
@@ -244,6 +403,9 @@ export class OIDCConnection extends EventEmitter {
   }
 
   private write(buffer: Buffer): void {
+    if (this.socket.destroyed) {
+      return;
+    }
     this.bytesOut += buffer.length;
     this.socket.write(buffer);
   }
@@ -318,13 +480,13 @@ export class OIDCConnection extends EventEmitter {
       if (result.valid) {
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         const email = result.email!;
-        const userClient = await this.provisionUser(msg.header.requestID, email);
-        if (!userClient) {
+        const lease = await this.provisionUser(msg.header.requestID, email);
+        if (!lease) {
           return;
         }
 
         // Authentication successful
-        this.replaceUserClient(userClient);
+        this.replaceLease(lease);
         this.authenticated = true;
         this.email = email;
         this.subject = result.subject;
@@ -390,13 +552,13 @@ export class OIDCConnection extends EventEmitter {
 
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const email = result.email!;
-    const userClient = await this.provisionUser(msg.header.requestID, email);
-    if (!userClient) {
+    const lease = await this.provisionUser(msg.header.requestID, email);
+    if (!lease) {
       return;
     }
 
     // Authentication successful
-    this.replaceUserClient(userClient);
+    this.replaceLease(lease);
     this.authenticated = true;
     this.subject = result.subject;
     this.email = email;
@@ -409,80 +571,22 @@ export class OIDCConnection extends EventEmitter {
     this.emit('authSuccess', email, result.subject);
   }
 
-  private async provisionUser(requestId: number, email: string): Promise<MongoClient | null> {
-    const { value } = await this.singleflight.do(email, async () => {
-      this.emit('debug', email, `Checking roles for ${email}...`);
-      const adminDb = this.backendClient.db('admin');
-
-      // Verify role exists
-      const rolesInfo = await adminDb.command({ rolesInfo: email });
-      if (!rolesInfo.roles || rolesInfo.roles.length === 0) {
-        this.emit('debug', email, `Role ${email} not found in DB`);
-        this.socket.write(this.messageBuilder.buildAuthFailureResponse(
-          requestId,
-          `Role '${email}' not defined`
-        ));
-        return null;
-      }
-
-      const cachedPassword = this.userPasswordCache.get(email);
-      if (cachedPassword) {
-        this.emit('debug', email, `User found in cache ${email}`);
-        return {
-          username: email,
-          password: cachedPassword
-        };
-      }
-
-      // Create/Update user with random password
-      const password = randomBytes(32).toString('base64');
-
-      try {
-        await adminDb.command({
-          updateUser: email,
-          pwd: password,
-          roles: [{ role: email, db: 'admin' }]
-        });
-        this.emit('debug', email, `Updated user ${email}`);
-      } catch (err: any) {
-        if (err.codeName === 'UserNotFound') {
-          await adminDb.command({
-            createUser: email,
-            pwd: password,
-            roles: [{ role: email, db: 'admin' }]
-          });
-          this.emit('debug', email, `Created user ${email}`);
-        } else {
-          throw err;
-        }
-      }
-
-      // Set the new password in the cache
-      this.userPasswordCache.set(email, password);
-
-      return {
-        username: email,
-        password: password
-      };
-    });
-
-    if (!value) {
+  private async provisionUser(requestId: number, email: string): Promise<UserClientLease | null> {
+    const result = await this.provisioner.provisionUser(email, this.lease, (message) => this.emit('debug', email, message));
+    if ('error' in result) {
+      this.emit('debug', email, result.error);
+      this.write(this.messageBuilder.buildAuthFailureResponse(requestId, result.error));
       return null;
     }
-
-    const { protocol, host, params } = this.backendInfo;
-    const userClient = await new MongoClient(
-      `${protocol}//${encodeURIComponent(value.username)}:${encodeURIComponent(value.password)}@${host}/?${params.toString()}`
-    ).connect();
 
     // The client may have disconnected while the user was being provisioned.
-    // The socket close handler has already run, so nothing else would close this
+    // The socket close handler has already run, so nothing else would release this
     if (this.socket.destroyed) {
-      userClient.close().catch(() => { });
+      result.lease.release();
       return null;
     }
 
-    return userClient;
+    return result.lease;
   }
 
   private extractJwtFromPayload(payload?: Uint8Array): string | null {
@@ -523,7 +627,7 @@ export class OIDCConnection extends EventEmitter {
     const helloResponse: Document = {
       ismaster: true,
       maxBsonObjectSize: 16777216,
-      maxMessageSizeBytes: 48000000,
+      maxMessageSizeBytes: MAX_MESSAGE_SIZE_BYTES,
       maxWriteBatchSize: 100000,
       localTime: new Date(),
       logicalSessionTimeoutMinutes: 30,
@@ -541,13 +645,13 @@ export class OIDCConnection extends EventEmitter {
     this.write(response);
   }
 
-  // Swap in a new per-user backend client, closing the previous one so its
-  // connection pool is not leaked when a connection reauthenticates
-  private replaceUserClient(userClient: MongoClient | undefined): void {
-    const previousClient = this.userClient;
-    this.userClient = userClient;
-    if (previousClient && previousClient !== userClient) {
-      previousClient.close().catch(() => { });
+  // Swap in a new lease on the user's backend client, releasing the previous one
+  // so the shared client is closed once no connection uses it
+  private replaceLease(lease: UserClientLease | undefined): void {
+    const previous = this.lease;
+    this.lease = lease;
+    if (previous !== lease) {
+      previous?.release();
     }
   }
 
@@ -555,8 +659,8 @@ export class OIDCConnection extends EventEmitter {
     this.authenticated = false;
     this.tokenExp = undefined;
 
-    // Release the user's backend connection; a new one is provisioned on reauth
-    this.replaceUserClient(undefined);
+    // Release the user's backend client; a lease is acquired again on reauth
+    this.replaceLease(undefined);
 
     this.write(this.messageBuilder.buildErrorResponse(
       requestID,
@@ -593,9 +697,9 @@ export class OIDCConnection extends EventEmitter {
     delete command.$db;
 
     try {
-      // Use the dedicated user client
+      // Use the user's own backend client
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const result = await this.userClient!.db(dbName).command(command as Document);
+      const result = await this.lease!.client.db(dbName).command(command as Document);
 
       // Ensure cursor.id is a proper BSON Long type for mongosh compatibility
       if (result.cursor && result.cursor.id !== undefined) {

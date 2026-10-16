@@ -18,6 +18,7 @@ export interface ParsedArgs {
   jwksUri?: string;
   audience?: string;
   logFile?: string;
+  maxConnectionsPerUser?: number;
   positional: string[];
 }
 
@@ -60,6 +61,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       args.audience = argv[++i];
     } else if (arg === '--log-file' && i + 1 < argv.length) {
       args.logFile = argv[++i];
+    } else if (arg === '--max-connections-per-user' && i + 1 < argv.length) {
+      args.maxConnectionsPerUser = parsePositiveInt(argv[++i]);
     } else if (!arg.startsWith('--')) {
       args.positional.push(arg);
     }
@@ -68,6 +71,19 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   return args;
+}
+
+function parsePositiveInt(value: string): number | undefined {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+// Passwords in createUser/updateUser commands must never reach the logs
+export function redactPasswords(request: unknown): unknown {
+  if (request && typeof request === 'object' && 'pwd' in request) {
+    return { ...request, pwd: '[REDACTED]' };
+  }
+  return request;
 }
 
 export function parseAddress(str: string): { host: string; port: number } | { path: string } {
@@ -102,6 +118,7 @@ Options:
   --jwks-uri <url>      Custom JWKS endpoint (optional, defaults to issuer/.well-known/jwks.json)
   --audience <aud>      Expected JWT audience claim (optional)
   --log-file <path>     Write NDJSON logs to a rotating file instead of stdout
+  --max-connections-per-user <n>  Max concurrent connections per user (default: unlimited)
 `);
 }
 
@@ -282,7 +299,8 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
     jwksUri: args.jwksUri,
     audience: args.audience,
     listenPort: local.port,
-    listenHost: local.host
+    listenHost: local.host,
+    maxConnectionsPerUser: args.maxConnectionsPerUser
   });
 
   proxy.on('listening', (addr) => {
@@ -431,7 +449,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
           user: normalizedUser,
           db,
           cmd,
-          request,
+          request: redactPasswords(request),
           tags: args.tags,
           requestBytes,
           responseBytes,
@@ -457,7 +475,7 @@ async function runOIDCProxy(args: ParsedArgs): Promise<void> {
           user: normalizedUser,
           db,
           cmd,
-          request,
+          request: redactPasswords(request),
           error,
           tags: args.tags,
           bytesInTotal: conn.bytesIn,
