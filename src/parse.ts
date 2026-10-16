@@ -5,9 +5,6 @@ import { type Binary, deserialize } from 'bson';
 // Largest message MongoDB accepts (its advertised maxMessageSizeBytes)
 export const MAX_MESSAGE_SIZE_BYTES = 48000000;
 
-// Smallest valid BSON document: int32 length + terminating null byte
-const MIN_BSON_DOCUMENT_SIZE = 5;
-
 export interface ParseOptions {
   // Decompress OP_COMPRESSED messages (default: true)
   allowCompressed?: boolean;
@@ -21,13 +18,6 @@ function view(buf: Uint8Array, length: number, offset: number, size: number): Ui
     throw new RangeError(`Out of bounds read at offset ${offset} with size ${size} (message length ${length})`);
   }
   return buf.subarray(offset, offset + size);
-}
-
-function bsonView(buf: Uint8Array, length: number, offset: number, size: number): Uint8Array {
-  if (size < MIN_BSON_DOCUMENT_SIZE) {
-    throw new RangeError(`Invalid BSON document size ${size} at offset ${offset}`);
-  }
-  return view(buf, length, offset, size);
 }
 
 class MessageHeader {
@@ -167,7 +157,7 @@ class OpMsg {
         case 0:
           {
             const bsonSize = dv.getUint32(i + 1, true);
-            sections.push(new OpMsgBodySection(new BSONBuffer(bsonView(buf, length, i + 1, bsonSize))));
+            sections.push(new OpMsgBodySection(new BSONBuffer(view(buf, length, i + 1, bsonSize))));
             i += 1 + bsonSize;
           }
           break;
@@ -184,7 +174,7 @@ class OpMsg {
             const objects: BSONBuffer[] = [];
             for (i = i + 1; i < seqIdStart - 4 + sectionSize;) {
               const bsonSize = dv.getUint32(i, true);
-              objects.push(new BSONBuffer(bsonView(buf, length, i, bsonSize)));
+              objects.push(new BSONBuffer(view(buf, length, i, bsonSize)));
               i += bsonSize;
             }
             sections.push(new OpMsgDocumentSequenceSection(docSequenceId, objects));
@@ -193,7 +183,7 @@ class OpMsg {
         case 2:
           {
             const bsonSize = dv.getUint32(i + 1, true);
-            sections.push(new OpMsgSecurityTokenSection(new BSONBuffer(bsonView(buf, length, i + 1, bsonSize))));
+            sections.push(new OpMsgSecurityTokenSection(new BSONBuffer(view(buf, length, i + 1, bsonSize))));
             i += 1 + bsonSize;
           }
           break;
@@ -245,12 +235,12 @@ class OpUpdate {
     let update: BSONBuffer;
     {
       const bsonSize = dv.getUint32(i, true);
-      selector = new BSONBuffer(bsonView(buf, length, i, bsonSize));
+      selector = new BSONBuffer(view(buf, length, i, bsonSize));
       i += bsonSize;
     }
     {
       const bsonSize = dv.getUint32(i, true);
-      update = new BSONBuffer(bsonView(buf, length, i, bsonSize));
+      update = new BSONBuffer(view(buf, length, i, bsonSize));
       i += bsonSize;
     }
 
@@ -292,7 +282,7 @@ class OpInsert {
     const documents: BSONBuffer[] = [];
     while (i < length) {
       const bsonSize = dv.getUint32(i, true);
-      documents.push(new BSONBuffer(bsonView(buf, length, i, bsonSize)));
+      documents.push(new BSONBuffer(view(buf, length, i, bsonSize)));
       i += bsonSize;
     }
 
@@ -351,12 +341,12 @@ class OpQuery {
     let returnFieldsSelector: BSONBuffer | null = null;
     {
       const bsonSize = dv.getUint32(i, true);
-      query = new BSONBuffer(bsonView(buf, length, i, bsonSize));
+      query = new BSONBuffer(view(buf, length, i, bsonSize));
       i += bsonSize;
     }
     if (i < length) {
       const bsonSize = dv.getUint32(i, true);
-      returnFieldsSelector = new BSONBuffer(bsonView(buf, length, i, bsonSize));
+      returnFieldsSelector = new BSONBuffer(view(buf, length, i, bsonSize));
       i += bsonSize;
     }
 
@@ -442,7 +432,7 @@ class OpDelete {
     let selector: BSONBuffer;
     {
       const bsonSize = dv.getUint32(i, true);
-      selector = new BSONBuffer(bsonView(buf, length, i, bsonSize));
+      selector = new BSONBuffer(view(buf, length, i, bsonSize));
       i += bsonSize;
     }
 
@@ -597,7 +587,7 @@ class OpReply {
     const documents: BSONBuffer[] = [];
     while (i < length) {
       const bsonSize = dv.getUint32(i, true);
-      documents.push(new BSONBuffer(bsonView(buf, length, i, bsonSize)));
+      documents.push(new BSONBuffer(view(buf, length, i, bsonSize)));
       i += bsonSize;
     }
 
@@ -631,11 +621,6 @@ async function ReadOpContents(
   length: number,
   options: ParseOptions
 ): Promise<{ msg: OpContents; readBytes: number }> {
-  // Readers build DataViews of `length` bytes over data's underlying buffer
-  if (length < 0 || length > data.length) {
-    throw new RangeError(`Invalid message body length ${length}`);
-  }
-
   switch (opcode) {
     case OpCode.OP_MSG:
       return OpMsg.Read(data, length);

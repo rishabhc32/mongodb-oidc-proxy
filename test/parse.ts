@@ -82,7 +82,7 @@ describe('ParseMessage', () => {
     const body = Buffer.concat([Buffer.alloc(4), section, seqId, emptyDoc]);
     await assert.rejects(
       ParseMessage(Buffer.concat([header(16 + body.length, OpCode.OP_MSG), body])),
-      /Invalid BSON document size/
+      /bson size must be >= 5/
     );
   });
 
