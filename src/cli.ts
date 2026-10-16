@@ -64,7 +64,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === '--log-file' && i + 1 < argv.length) {
       args.logFile = argv[++i];
     } else if (arg === '--max-connections-per-user' && i + 1 < argv.length) {
-      args.maxConnectionsPerUser = parsePositiveInt(argv[++i]);
+      const n = Number(argv[++i]);
+      args.maxConnectionsPerUser = Number.isInteger(n) && n > 0 ? n : undefined;
     } else if (!arg.startsWith('--')) {
       args.positional.push(arg);
     }
@@ -73,11 +74,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   return args;
-}
-
-function parsePositiveInt(value: string): number | undefined {
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
 // Passwords in createUser/updateUser commands must never reach the logs

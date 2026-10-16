@@ -61,19 +61,15 @@ export class MessageBuilder {
     return this.buildOpMsg(responseTo, response);
   }
 
-  buildSaslContinueResponse(responseTo: number, conversationId: number, done: boolean): Buffer {
+  buildAuthSuccessResponse(responseTo: number, conversationId: number): Buffer {
     const response: Document = {
       conversationId,
-      done,
+      done: true,
       payload: new Binary(Buffer.alloc(0)),
       ok: 1
     };
 
     return this.buildOpMsg(responseTo, response);
-  }
-
-  buildAuthSuccessResponse(responseTo: number, conversationId: number): Buffer {
-    return this.buildSaslContinueResponse(responseTo, conversationId, true);
   }
 
   buildAuthFailureResponse(responseTo: number, errorMessage: string, code = 18): Buffer {

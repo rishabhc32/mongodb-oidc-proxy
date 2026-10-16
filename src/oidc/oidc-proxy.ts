@@ -8,11 +8,10 @@ import { WireProtocolParser } from '@src/parse-stream';
 import { FullMessage, MAX_MESSAGE_SIZE_BYTES, getSaslCommand, getCommandDb, getCommandBody } from '@src/parse';
 import { JWTValidator, JWTValidationError } from '@src/oidc/jwt-validator';
 import { MessageBuilder } from '@src/oidc/message-builder';
-import { SharedClientPool } from '@src/oidc/shared-client-pool';
+import { SharedClientPool, type UserClientLease } from '@src/oidc/shared-client-pool';
 import { randomBytes } from '@src/utils/random';
 import { ksuid } from '@src/utils/ksuid';
 import type { OIDCProxyConfig, IdpInfo } from '@src/oidc/types';
-import type { UserProvisioner, UserClientLease, ProvisionResult } from '@src/oidc/user-provisioner';
 
 const DEFAULT_MAX_CONNECTIONS = 10000;
 const DEFAULT_CONNECTION_TIMEOUT_MS = 120000;
@@ -30,7 +29,7 @@ interface BackendInfo {
   params: URLSearchParams;
 }
 
-export class OIDCProxy extends EventEmitter implements UserProvisioner {
+export class OIDCProxy extends EventEmitter {
   private readonly server: Server;
   private readonly backendClient: MongoClient;
   private readonly jwtValidator: JWTValidator;
@@ -112,7 +111,7 @@ export class OIDCProxy extends EventEmitter implements UserProvisioner {
     email: string,
     current: UserClientLease | undefined,
     debug: (message: string) => void
-  ): Promise<ProvisionResult> {
+  ): Promise<{ lease: UserClientLease } | { error: string }> {
     debug(`Checking roles for ${email}...`);
     const error = await this.authorizeUser(email);
     if (error) {
@@ -237,13 +236,11 @@ export class OIDCConnection extends EventEmitter {
   private closing = false;
   private readonly inFlight = new Set<Promise<void>>();
   private conversationId = 0;
-  private authenticated = false;
-  private subject?: string;
   private email?: string;
   private tokenExp?: number;
   private jwtValidator: JWTValidator;
   private messageBuilder: MessageBuilder;
-  private provisioner: UserProvisioner;
+  private proxy: OIDCProxy;
   private idpInfo: IdpInfo;
 
   constructor(
@@ -253,7 +250,7 @@ export class OIDCConnection extends EventEmitter {
     timeoutMs: number,
     jwtValidator: JWTValidator,
     messageBuilder: MessageBuilder,
-    provisioner: UserProvisioner,
+    proxy: OIDCProxy,
     idpInfo: IdpInfo
   ) {
     super();
@@ -264,7 +261,7 @@ export class OIDCConnection extends EventEmitter {
     this.socket = socket;
     this.jwtValidator = jwtValidator;
     this.messageBuilder = messageBuilder;
-    this.provisioner = provisioner;
+    this.proxy = proxy;
     this.idpInfo = idpInfo;
     // Compression is never advertised, and decompressing before auth is a DoS vector
     this.parser = new WireProtocolParser({ allowCompressed: false });
@@ -399,8 +396,8 @@ export class OIDCConnection extends EventEmitter {
       return;
     }
 
-    // For non-auth commands, check if authenticated
-    if (!this.authenticated) {
+    const lease = this.lease;
+    if (!lease) {
       const body = getCommandBody(msg);
       const cmdName = this.getCommandName(body);
 
@@ -427,8 +424,7 @@ export class OIDCConnection extends EventEmitter {
       return;
     }
 
-    // Forward authenticated commands to backend
-    await this.forwardCommand(msg);
+    await this.forwardCommand(msg, lease);
   }
 
   private async handleSaslStart(msg: FullMessage, payload?: Uint8Array): Promise<void> {
@@ -451,13 +447,11 @@ export class OIDCConnection extends EventEmitter {
 
         // Authentication successful
         this.replaceLease(lease);
-        this.authenticated = true;
         this.email = email;
-        this.subject = result.subject;
         this.tokenExp = result.exp;
 
         this.write(this.messageBuilder.buildAuthSuccessResponse(msg.header.requestID, this.conversationId));
-        this.emit('authSuccess', email, this.subject);
+        this.emit('authSuccess', email, result.subject);
         return;
       }
 
@@ -509,8 +503,6 @@ export class OIDCConnection extends EventEmitter {
 
     // Authentication successful
     this.replaceLease(lease);
-    this.authenticated = true;
-    this.subject = result.subject;
     this.email = email;
     this.tokenExp = result.exp;
 
@@ -519,9 +511,7 @@ export class OIDCConnection extends EventEmitter {
   }
 
   private async provisionUser(requestId: number, email: string): Promise<UserClientLease | null> {
-    const result = await this.provisioner.provisionUser(email, this.lease, (message) =>
-      this.emit('debug', email, message)
-    );
+    const result = await this.proxy.provisionUser(email, this.lease, (message) => this.emit('debug', email, message));
     if ('error' in result) {
       this.emit('debug', email, result.error);
       this.write(this.messageBuilder.buildAuthFailureResponse(requestId, result.error));
@@ -608,7 +598,6 @@ export class OIDCConnection extends EventEmitter {
   }
 
   private sendReauthRequired(requestID: number, reason: string): void {
-    this.authenticated = false;
     this.tokenExp = undefined;
 
     // Release the user's backend client; a lease is acquired again on reauth
@@ -625,16 +614,9 @@ export class OIDCConnection extends EventEmitter {
     this.emit('reauthRequired', this.email, reason);
   }
 
-  private async forwardCommand(msg: FullMessage): Promise<void> {
-    // Capture the lease before any await: the connection can reauthenticate as
-    // another user while this command runs, and the command must run and be
-    // logged as the user who sent it
-    const lease = this.lease;
-    if (!lease) {
-      this.write(this.messageBuilder.buildAuthFailureResponse(msg.header.requestID, 'Authentication required', 13));
-      return;
-    }
-
+  // Runs and logs the command as the lease's user, even if the connection
+  // reauthenticates as someone else while it runs
+  private async forwardCommand(msg: FullMessage, lease: UserClientLease): Promise<void> {
     const dbName = getCommandDb(msg) || 'admin';
     const body = getCommandBody(msg);
     const cmdName = this.getCommandName(body);

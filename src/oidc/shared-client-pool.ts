@@ -1,5 +1,11 @@
 import type { MongoClient } from 'mongodb';
-import type { UserClientLease } from '@src/oidc/user-provisioner';
+
+// A connection's hold on the backend client shared by all of a user's connections
+export interface UserClientLease {
+  readonly email: string;
+  readonly client: MongoClient;
+  release(): void;
+}
 
 interface PoolEntry {
   client: Promise<MongoClient>;
