@@ -1,5 +1,8 @@
 import assert from 'assert';
-import { parseArgs, parseAddress, redactPasswords } from '@src/cli';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { parseArgs, parseAddress, redactPasswords, resolveConnectionString } from '@src/cli';
 
 describe('cli parseArgs', () => {
   it('parses --help flag', () => {
@@ -164,6 +167,45 @@ describe('cli redactPasswords', () => {
     const request = { find: 'users', filter: { name: 'alice' } };
     assert.strictEqual(redactPasswords(request), request);
     assert.strictEqual(redactPasswords(undefined), undefined);
+  });
+});
+
+describe('cli resolveConnectionString', () => {
+  const noFlag = parseArgs(['node', 'cli.ts']);
+  let tmpDir: string;
+  let secretFile: string;
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-test-'));
+    secretFile = path.join(tmpDir, 'mongo_connection_string');
+    fs.writeFileSync(secretFile, 'mongodb://from-file:27017\n');
+  });
+
+  after(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('prefers --connection-string', () => {
+    const args = parseArgs(['node', 'cli.ts', '--connection-string', 'mongodb://flag:27017']);
+    const env = { MONGO_CONNECTION_STRING: 'mongodb://env:27017', MONGO_CONNECTION_STRING_FILE: secretFile };
+    assert.strictEqual(resolveConnectionString(args, env), 'mongodb://flag:27017');
+  });
+
+  it('falls back to MONGO_CONNECTION_STRING', () => {
+    const env = { MONGO_CONNECTION_STRING: 'mongodb://env:27017', MONGO_CONNECTION_STRING_FILE: secretFile };
+    assert.strictEqual(resolveConnectionString(noFlag, env), 'mongodb://env:27017');
+  });
+
+  it('reads the file named by MONGO_CONNECTION_STRING_FILE, trimming whitespace', () => {
+    assert.strictEqual(resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: secretFile }), 'mongodb://from-file:27017');
+  });
+
+  it('returns undefined when nothing is set', () => {
+    assert.strictEqual(resolveConnectionString(noFlag, {}), undefined);
+  });
+
+  it('throws when the file cannot be read', () => {
+    assert.throws(() => resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: path.join(tmpDir, 'missing') }), /ENOENT/);
   });
 });
 

@@ -2,6 +2,7 @@ import { Proxy, ConnectionPair } from '@src/proxy';
 import { OIDCProxy, OIDCConnection } from '@src/oidc';
 import type { FullMessage } from '@src/parse';
 import { EJSON } from 'bson';
+import fs from 'fs';
 import winston from 'winston';
 
 type OptionalUser = string | null | undefined;
@@ -86,6 +87,21 @@ export function redactPasswords(request: unknown): unknown {
   return request;
 }
 
+// Precedence: --connection-string, MONGO_CONNECTION_STRING, then the file named by
+// MONGO_CONNECTION_STRING_FILE (how Docker and Kubernetes mount secrets)
+export function resolveConnectionString(args: ParsedArgs, env: NodeJS.ProcessEnv): string | undefined {
+  if (args.connectionString) {
+    return args.connectionString;
+  }
+  if (env.MONGO_CONNECTION_STRING) {
+    return env.MONGO_CONNECTION_STRING;
+  }
+  if (env.MONGO_CONNECTION_STRING_FILE) {
+    return fs.readFileSync(env.MONGO_CONNECTION_STRING_FILE, 'utf8').trim() || undefined;
+  }
+  return undefined;
+}
+
 export function parseAddress(str: string): { host: string; port: number } | { path: string } {
   if (str.startsWith('/') || str.includes('\\')) {
     return { path: str };
@@ -114,7 +130,8 @@ Options:
   --oidc-mode           Enable OIDC authentication termination mode
   --issuer <url>        OIDC issuer URL (required for OIDC mode)
   --client-id <id>      OAuth client ID to return to clients (required for OIDC mode)
-  --connection-string <uri>  Backend MongoDB connection string (or MONGO_CONNECTION_STRING env)
+  --connection-string <uri>  Backend MongoDB connection string (or MONGO_CONNECTION_STRING env,
+                        or MONGO_CONNECTION_STRING_FILE naming a file that contains it)
   --jwks-uri <url>      Custom JWKS endpoint (optional, defaults to issuer/.well-known/jwks.json)
   --audience <aud>      Expected JWT audience claim (optional)
   --log-file <path>     Write NDJSON logs to a rotating file instead of stdout
@@ -269,10 +286,15 @@ async function runTransparentProxy(args: ParsedArgs): Promise<void> {
 }
 
 async function runOIDCProxy(args: ParsedArgs): Promise<void> {
-  args.connectionString ??= process.env.MONGO_CONNECTION_STRING;
+  try {
+    args.connectionString = resolveConnectionString(args, process.env);
+  } catch (err) {
+    console.error(`Error: cannot read MONGO_CONNECTION_STRING_FILE: ${(err as Error).message}`);
+    process.exit(1);
+  }
 
   if (!args.issuer || !args.clientId || !args.connectionString) {
-    console.error('Error: --oidc-mode requires --issuer, --client-id, and --connection-string (or MONGO_CONNECTION_STRING env)');
+    console.error('Error: --oidc-mode requires --issuer, --client-id, and --connection-string (or MONGO_CONNECTION_STRING / MONGO_CONNECTION_STRING_FILE env)');
     printUsage();
     process.exit(1);
   }
