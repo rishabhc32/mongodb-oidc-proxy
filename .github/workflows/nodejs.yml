@@ -20,6 +20,9 @@ jobs:
         node-version: [22.x, 24.x]
     runs-on: ${{matrix.os}}
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write # for the coverage comment
     steps:
       - uses: actions/checkout@v5
       - name: Use Node.js ${{ matrix.node-version }}
@@ -30,6 +33,17 @@ jobs:
         run: npm ci
       - name: Test
         run: npm test
+      # One comment per pull request, updated on each push. Skipped for forks and
+      # Dependabot, whose pull requests get a read-only token
+      - name: Comment coverage on the pull request
+        if: >-
+          matrix.node-version == '24.x' && github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo '### Coverage'; echo '```'; npx c8 report --reporter=text; echo '```'; } > coverage.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file coverage.md --edit-last --create-if-none
 
   docker:
     name: Docker images
