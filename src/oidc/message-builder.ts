@@ -1,3 +1,5 @@
+import zlib from 'zlib';
+import { promisify } from 'util';
 import { serialize, Binary, Document } from 'bson';
 import { OpCode } from '@src/parse';
 import type { IdpInfo } from '@src/oidc/types';
@@ -61,19 +63,15 @@ export class MessageBuilder {
     return this.buildOpMsg(responseTo, response);
   }
 
-  buildSaslContinueResponse(responseTo: number, conversationId: number, done: boolean): Buffer {
+  buildAuthSuccessResponse(responseTo: number, conversationId: number): Buffer {
     const response: Document = {
       conversationId,
-      done,
+      done: true,
       payload: new Binary(Buffer.alloc(0)),
       ok: 1
     };
 
     return this.buildOpMsg(responseTo, response);
-  }
-
-  buildAuthSuccessResponse(responseTo: number, conversationId: number): Buffer {
-    return this.buildSaslContinueResponse(responseTo, conversationId, true);
   }
 
   buildAuthFailureResponse(responseTo: number, errorMessage: string, code = 18): Buffer {
@@ -104,6 +102,23 @@ export class MessageBuilder {
     };
 
     return this.buildOpMsg(responseTo, response);
+  }
+
+  // Wraps a built message in a zlib OP_COMPRESSED message with the same request IDs
+  async compress(message: Buffer): Promise<Buffer> {
+    const body = message.subarray(16);
+    const compressed = await promisify(zlib.deflate)(body);
+
+    const header = Buffer.from(message.subarray(0, 16));
+    header.writeInt32LE(16 + 9 + compressed.length, 0);
+    header.writeInt32LE(OpCode.OP_COMPRESSED, 12);
+
+    const compression = Buffer.alloc(9);
+    compression.writeInt32LE(message.readInt32LE(12), 0); // original opcode
+    compression.writeInt32LE(body.length, 4); // uncompressed size
+    compression.writeUInt8(2, 8); // compressor id: zlib
+
+    return Buffer.concat([header, compression, compressed]);
   }
 
   // Build legacy OP_REPLY for older drivers using OP_QUERY

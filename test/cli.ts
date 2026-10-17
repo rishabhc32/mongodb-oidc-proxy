@@ -1,5 +1,8 @@
 import assert from 'assert';
-import { parseArgs, parseAddress } from '@src/cli';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { createLogSink, parseArgs, parseAddress, redactPasswords, resolveConnectionString } from '@src/cli';
 
 describe('cli parseArgs', () => {
   it('parses --help flag', () => {
@@ -79,16 +82,24 @@ describe('cli parseArgs', () => {
 
   it('parses multiple flags together', () => {
     const args = parseArgs([
-      'node', 'cli.ts',
+      'node',
+      'cli.ts',
       '--ndjson',
       '--oidc-mode',
-      '--issuer', 'https://auth.example.com',
-      '--client-id', 'test-client',
-      '--connection-string', 'mongodb://localhost:27017',
-      '--jwks-uri', 'https://auth.example.com/jwks',
-      '--audience', 'https://api.example.com',
-      '--log-level', 'debug',
-      '--tag', 'alpha',
+      '--issuer',
+      'https://auth.example.com',
+      '--client-id',
+      'test-client',
+      '--connection-string',
+      'mongodb://localhost:27017',
+      '--jwks-uri',
+      'https://auth.example.com/jwks',
+      '--audience',
+      'https://api.example.com',
+      '--log-level',
+      'debug',
+      '--tag',
+      'alpha',
       '3000'
     ]);
     assert.strictEqual(args.ndjson, true);
@@ -106,6 +117,18 @@ describe('cli parseArgs', () => {
   it('parses --log-file', () => {
     const args = parseArgs(['node', 'cli.ts', '--log-file', '/var/log/proxy.log']);
     assert.strictEqual(args.logFile, '/var/log/proxy.log');
+  });
+
+  it('parses --max-connections-per-user', () => {
+    const args = parseArgs(['node', 'cli.ts', '--max-connections-per-user', '25']);
+    assert.strictEqual(args.maxConnectionsPerUser, 25);
+  });
+
+  it('ignores a non-positive --max-connections-per-user', () => {
+    for (const value of ['0', '-1', '2.5', 'abc']) {
+      const args = parseArgs(['node', 'cli.ts', '--max-connections-per-user', value]);
+      assert.strictEqual(args.maxConnectionsPerUser, undefined, value);
+    }
   });
 
   it('handles missing value for --log-file at end', () => {
@@ -138,6 +161,82 @@ describe('cli parseArgs', () => {
     assert.strictEqual(args.logFile, undefined);
     assert.deepStrictEqual(args.tags, []);
     assert.deepStrictEqual(args.positional, []);
+  });
+});
+
+describe('cli redactPasswords', () => {
+  it('redacts pwd and keeps every other field', () => {
+    const request = { createUser: 'alice', pwd: 'secret', roles: ['read'] };
+    assert.deepStrictEqual(redactPasswords(request), { createUser: 'alice', pwd: '[REDACTED]', roles: ['read'] });
+    assert.strictEqual(request.pwd, 'secret'); // input is not mutated
+  });
+
+  it('returns requests without pwd unchanged', () => {
+    const request = { find: 'users', filter: { name: 'alice' } };
+    assert.strictEqual(redactPasswords(request), request);
+    assert.strictEqual(redactPasswords(undefined), undefined);
+  });
+});
+
+describe('cli resolveConnectionString', () => {
+  const noFlag = parseArgs(['node', 'cli.ts']);
+  let tmpDir: string;
+  let secretFile: string;
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-test-'));
+    secretFile = path.join(tmpDir, 'mongo_connection_string');
+    fs.writeFileSync(secretFile, 'mongodb://from-file:27017\n');
+  });
+
+  after(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('prefers --connection-string', () => {
+    const args = parseArgs(['node', 'cli.ts', '--connection-string', 'mongodb://flag:27017']);
+    const env = { MONGO_CONNECTION_STRING: 'mongodb://env:27017', MONGO_CONNECTION_STRING_FILE: secretFile };
+    assert.strictEqual(resolveConnectionString(args, env), 'mongodb://flag:27017');
+  });
+
+  it('falls back to MONGO_CONNECTION_STRING', () => {
+    const env = { MONGO_CONNECTION_STRING: 'mongodb://env:27017', MONGO_CONNECTION_STRING_FILE: secretFile };
+    assert.strictEqual(resolveConnectionString(noFlag, env), 'mongodb://env:27017');
+  });
+
+  it('reads the file named by MONGO_CONNECTION_STRING_FILE, trimming whitespace', () => {
+    assert.strictEqual(
+      resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: secretFile }),
+      'mongodb://from-file:27017'
+    );
+  });
+
+  it('returns undefined when nothing is set', () => {
+    assert.strictEqual(resolveConnectionString(noFlag, {}), undefined);
+  });
+
+  it('throws when the file cannot be read', () => {
+    assert.throws(
+      () => resolveConnectionString(noFlag, { MONGO_CONNECTION_STRING_FILE: path.join(tmpDir, 'missing') }),
+      /ENOENT/
+    );
+  });
+});
+
+describe('cli createLogSink', () => {
+  it('has written every line to the log file once closeLog resolves', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-test-'));
+    try {
+      const logFile = path.join(tmpDir, 'proxy.log');
+      const { writeEvent, closeLog } = createLogSink(logFile, []);
+      for (let i = 0; i < 10000; i++) {
+        writeEvent('test', { i });
+      }
+      await closeLog();
+      assert.strictEqual(fs.readFileSync(logFile, 'utf8').trim().split('\n').length, 10000);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 

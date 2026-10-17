@@ -16,6 +16,9 @@
     "url": "https://github.com/mongodb-labs/mongodb-wp-proxy/issues"
   },
   "main": "lib/index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "bin": {
     "mongodb-wp-proxy": "bin/mongodb-wp-proxy.js"
   },
@@ -32,13 +35,14 @@
     ".esm-wrapper.mjs"
   ],
   "scripts": {
-    "lint": "eslint src test --ext .ts",
+    "lint": "eslint src test --ext .ts && prettier --check .",
     "testonly": "mongodb-runner exec -t standalone -- nyc mocha --colors -r ts-node/register -r tsconfig-paths/register test/*.ts",
     "test": "npm run lint && npm run build && npm run testonly",
     "build": "npm run compile-ts && gen-esm-wrapper . ./.esm-wrapper.mjs",
     "prepack": "npm run build",
     "compile-ts": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
-    "dev": "node -r ts-node/register -r tsconfig-paths/register src/cli.ts"
+    "dev": "node -r ts-node/register -r tsconfig-paths/register src/cli.ts",
+    "format": "prettier --write ."
   },
   "license": "Apache-2.0",
   "dependencies": {
@@ -49,12 +53,14 @@
     "winston": "^3.19.0"
   },
   "devDependencies": {
+    "@mongodb-js/mongodb-runner": "^8.4.2",
     "@types/mocha": "^8.0.3",
     "@types/node": "^25.3.3",
     "@types/sinon": "^10.0.20",
     "@typescript-eslint/eslint-plugin": "^5.30.7",
     "@typescript-eslint/parser": "^5.30.7",
     "eslint": "^7.9.0",
+    "eslint-config-prettier": "^10.1.8",
     "eslint-config-semistandard": "^15.0.1",
     "eslint-config-standard": "^14.1.1",
     "eslint-plugin-import": "^2.22.0",
@@ -63,12 +69,17 @@
     "eslint-plugin-standard": "^4.0.1",
     "gen-esm-wrapper": "^1.1.0",
     "mocha": "^11.7.5",
-    "mongodb-runner": "^5.9.2",
-    "nyc": "^15.1.0",
+    "nyc": "^18.0.0",
+    "prettier": "^3.9.10",
     "sinon": "^17.0.1",
     "ts-node": "^10.9.2",
     "tsc-alias": "^1.8.12",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.9.2"
+  },
+  "overrides": {
+    "mocha": {
+      "serialize-javascript": "^7.0.5"
+    }
   }
 }

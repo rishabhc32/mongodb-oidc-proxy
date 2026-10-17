@@ -37,4 +37,4 @@ curl -sSk -X PUT "${ES_URL}/mongo-logs-proxy-000001" \
   }'
 echo
 
-echo "==> Done. Fluent Bit should write to ES_INDEX=mongo-logs"
+echo "==> Done. Vector writes to the mongo-logs alias (ES_INDEX)"

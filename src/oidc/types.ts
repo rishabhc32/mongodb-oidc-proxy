@@ -14,15 +14,8 @@ export interface OIDCProxyConfig {
 
   // Limits
   maxConnections?: number; // Max concurrent connections (default: 10000)
+  maxConnectionsPerUser?: number; // Max concurrent authenticated connections per user (default: unlimited)
   connectionTimeoutMs?: number; // Idle connection timeout in ms (default: 120000 = 2min)
-}
-
-export interface OIDCAuthState {
-  conversationId: number;
-  authenticated: boolean;
-  principalName?: string;
-  email?: string;
-  tokenExp?: number;
 }
 
 export interface IdpInfo {

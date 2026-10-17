@@ -36,7 +36,9 @@ export class JWTValidator {
     try {
       const { payload } = await jwtVerify(token, this.jwks, {
         issuer: this.issuer,
-        audience: this.audience
+        audience: this.audience,
+        // Without exp a token, and every session built on it, never expires
+        requiredClaims: ['exp']
       });
 
       // Verify client_id
@@ -49,13 +51,23 @@ export class JWTValidator {
         };
       }
 
-      // Verify email exists
-      const email = (payload as Record<string, unknown>).email as string | undefined;
-      if (!email) {
+      // Verify email exists. It becomes the MongoDB user and role name
+      const email = (payload as Record<string, unknown>).email;
+      if (typeof email !== 'string' || email === '') {
         return {
           valid: false,
           errorCode: JWTValidationError.INVALID,
-          error: 'Email claim is required in JWT'
+          error: 'Email claim must be a non-empty string'
+        };
+      }
+
+      // Reject emails the IdP has marked unverified; some IdPs omit the claim
+      const emailVerified = (payload as Record<string, unknown>).email_verified;
+      if (emailVerified !== undefined && emailVerified !== true && emailVerified !== 'true') {
+        return {
+          valid: false,
+          errorCode: JWTValidationError.INVALID,
+          error: 'Email claim is not verified'
         };
       }
 

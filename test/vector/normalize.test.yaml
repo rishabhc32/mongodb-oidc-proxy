@@ -1,0 +1,99 @@
+# Unit tests for the normalize transform in ops/vector/vector.yaml:
+#   vector test ops/vector/vector.yaml test/vector/normalize.test.yaml
+# Vector expands environment variables in this file too, so literal dollar signs are doubled
+tests:
+  - name: normalizes a commandForwarded event
+    inputs:
+      - insert_at: normalize
+        type: log
+        log_fields:
+          message: >-
+            {"ts":"2026-10-16T10:00:00.123Z","ev":"commandForwarded","connId":"2Abc","user":"alice@example.com",
+            "db":"test","cmd":"update","request":{"update":"users","updates":[{"q":{"a.b":1},"u":{"$$set":{"c.d":2}}}]},
+            "tags":["prod"],"requestBytes":120,"responseBytes":45,"bytesInTotal":500,"bytesOutTotal":900}
+    outputs:
+      - extract_from: normalize
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(."@timestamp", "2026-10-16T10:00:00.123Z")
+              assert!(!exists(.ts))
+              assert_eq!(.ev, "commandForwarded")
+              assert_eq!(.connId, "2Abc")
+              assert_eq!(.user, "alice@example.com")
+              assert_eq!(.db, "test")
+              assert_eq!(.cmd, "update")
+              assert_eq!(.tags, ["prod"])
+              assert_eq!(.requestBytes, 120)
+              assert_eq!(.responseBytes, 45)
+              assert_eq!(.bytesInTotal, 500)
+              assert_eq!(.bytesOutTotal, 900)
+              assert_eq!(.error, "")
+              assert_eq!(.source, "")
+              assert_eq!(.request.update, "users")
+              assert_eq!(.request.updates[0].q, {"a_b": 1})
+              assert_eq!(.request.updates[0].u."$$set", {"c_d": 2})
+
+  - name: fills defaults and drops empty tags
+    inputs:
+      - insert_at: normalize
+        type: log
+        log_fields:
+          message: '{"ts":"2026-10-16T10:00:00.000Z","ev":"connectionClosed","connId":"2Abc","user":null,"tags":[],"bytesInTotal":10,"bytesOutTotal":20}'
+    outputs:
+      - extract_from: normalize
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.user, "")
+              assert_eq!(.db, "")
+              assert_eq!(.cmd, "")
+              assert_eq!(.requestBytes, 0)
+              assert_eq!(.responseBytes, 0)
+              assert_eq!(.bytesInTotal, 10)
+              assert!(!exists(.tags))
+
+  - name: keeps fields specific to an event type
+    inputs:
+      - insert_at: normalize
+        type: log
+        log_fields:
+          message: '{"ts":"2026-10-16T10:00:00.000Z","ev":"authFailed","connId":"2Abc","user":"bob@example.com","error":"Authentication failed: expired","tags":[]}'
+    outputs:
+      - extract_from: normalize
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.ev, "authFailed")
+              assert_eq!(.error, "Authentication failed: expired")
+
+  - name: uses the current time when ts is missing
+    inputs:
+      - insert_at: normalize
+        type: log
+        log_fields:
+          message: '{"ev":"listening","tags":[]}'
+    outputs:
+      - extract_from: normalize
+        conditions:
+          - type: vrl
+            source: |
+              assert!(match(string!(."@timestamp"), r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'))
+
+  - name: drops events without an event type
+    inputs:
+      - insert_at: normalize
+        type: log
+        log_fields:
+          message: '{"ts":"2026-10-16T10:00:00.000Z","connId":"2Abc"}'
+    no_outputs_from:
+      - normalize
+
+  - name: drops lines that are not JSON objects
+    inputs:
+      - insert_at: normalize
+        type: log
+        log_fields:
+          message: 'not json'
+    no_outputs_from:
+      - normalize

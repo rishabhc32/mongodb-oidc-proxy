@@ -1,0 +1,15 @@
+.git
+.github
+.vscode
+.idea
+.nyc_output
+coverage
+node_modules
+lib
+test
+ops
+secrets
+*.log
+.env
+.env.*
+.DS_Store

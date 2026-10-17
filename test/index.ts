@@ -7,6 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { once } from 'events';
+import { setTimeout } from 'timers/promises';
 
 let hostport: string;
 before(() => {
@@ -16,7 +17,7 @@ before(() => {
   hostport = process.env.MONGODB_HOSTPORT;
 });
 
-describe('Proxy', function() {
+describe('Proxy', function () {
   this.timeout(10_000);
 
   let proxy: Proxy;
@@ -44,22 +45,49 @@ describe('Proxy', function() {
   });
 
   it('records ismaster events', async () => {
-    assert(events.some(ev => ev.source === 'outgoing' && ev.msg?.contents.query?.data?.ismaster),
-      EJSON.stringify(events) + ' is missing ismaster query');
-    assert(events.some(ev => ev.source === 'incoming' && ev.msg?.contents.documents?.[0]?.data?.ismaster),
-      EJSON.stringify(events) + ' is missing ismaster reply');
+    assert(
+      events.some((ev) => ev.source === 'outgoing' && ev.msg?.contents.query?.data?.ismaster),
+      EJSON.stringify(events) + ' is missing ismaster query'
+    );
+    assert(
+      events.some((ev) => ev.source === 'incoming' && ev.msg?.contents.documents?.[0]?.data?.ismaster),
+      EJSON.stringify(events) + ' is missing ismaster reply'
+    );
   });
 
   it('records find queries', async () => {
     await client.db('test').collection('test').findOne();
-    assert(events.some(ev => ev.source === 'outgoing' && ev.msg?.contents.sections?.[0]?.body?.data?.find === 'test'),
-      EJSON.stringify(events) + ' is missing findOne query');
-    assert(events.some(ev => ev.source === 'incoming' && ev.msg?.contents.sections?.[0]?.body?.data?.cursor),
-      EJSON.stringify(events) + ' is missing findOne reply');
+    assert(
+      events.some((ev) => ev.source === 'outgoing' && ev.msg?.contents.sections?.[0]?.body?.data?.find === 'test'),
+      EJSON.stringify(events) + ' is missing findOne query'
+    );
+    assert(
+      events.some((ev) => ev.source === 'incoming' && ev.msg?.contents.sections?.[0]?.body?.data?.cursor),
+      EJSON.stringify(events) + ' is missing findOne reply'
+    );
   });
 });
 
-describe('bin', function() {
+describe('Proxy close', function () {
+  this.timeout(10_000);
+
+  it('closes open connections', async () => {
+    const proxy = new Proxy({ host: hostport.split(':')[0], port: +hostport.split(':')[1] });
+    const closed: string[] = [];
+    proxy.on('newConnection', (conn: any) => conn.on('connectionClosed', (source: string) => closed.push(source)));
+    await proxy.listen(0);
+    const client = await MongoClient.connect(`mongodb://localhost:${proxy.address().port}`);
+
+    try {
+      await proxy.close();
+      assert(closed.includes('outgoing') && closed.includes('incoming'), `closed: ${closed}`);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe('bin', function () {
   this.timeout(10_000);
 
   let proc: childProcess.ChildProcess;
@@ -69,12 +97,19 @@ describe('bin', function() {
 
   describe('human-readable', () => {
     beforeEach(async () => {
-      proc = childProcess.spawn('ts-node', [
-        '-P', path.join(__dirname, '..', 'tsconfig.json'),
-        '-r', 'tsconfig-paths/register',
-        path.join(__dirname, '..', 'src', 'cli.ts'),
-        hostport, 'localhost:0'
-      ], { stdio: 'pipe' });
+      proc = childProcess.spawn(
+        'ts-node',
+        [
+          '-P',
+          path.join(__dirname, '..', 'tsconfig.json'),
+          '-r',
+          'tsconfig-paths/register',
+          path.join(__dirname, '..', 'src', 'cli.ts'),
+          hostport,
+          'localhost:0'
+        ],
+        { stdio: 'pipe' }
+      );
       port = 0;
       await new Promise<void>((resolve) => {
         stdout = '';
@@ -114,7 +149,7 @@ describe('bin', function() {
 
   describe('ndjson --log-file', () => {
     let logFile: string;
-    let tmpDir: fs.DisposableTempDir;
+    let tmpDir: string;
 
     const parseNdjsonLines = (output: string) =>
       output
@@ -128,30 +163,43 @@ describe('bin', function() {
         })
         .filter(Boolean);
 
+    // Poll rather than fs.watch: watch events can be coalesced (e.g. FSEvents
+    // on macOS), so the write carrying the event may never be observed
     const waitForLogEvent = async (filePath: string, evName: string) => {
-      for await (const _ of fs.promises.watch(path.dirname(filePath))) {
+      for (;;) {
         try {
           const content = fs.readFileSync(filePath, 'utf8');
           const event = parseNdjsonLines(content).find((e) => e.ev === evName);
           if (event) return event;
         } catch {}
+        await setTimeout(50);
       }
     };
 
     beforeEach(async () => {
-      tmpDir = fs.mkdtempDisposableSync(path.join(os.tmpdir(), 'proxy-test-'));
-      logFile = path.join(tmpDir.path, 'proxy.log');
-      proc = childProcess.spawn('ts-node', [
-        '-P', path.join(__dirname, '..', 'tsconfig.json'),
-        '-r', 'tsconfig-paths/register',
-        path.join(__dirname, '..', 'src', 'cli.ts'),
-        '--ndjson',
-        '--log-file', logFile,
-        hostport, 'localhost:0'
-      ], { stdio: 'pipe' });
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-test-'));
+      logFile = path.join(tmpDir, 'proxy.log');
+      proc = childProcess.spawn(
+        'ts-node',
+        [
+          '-P',
+          path.join(__dirname, '..', 'tsconfig.json'),
+          '-r',
+          'tsconfig-paths/register',
+          path.join(__dirname, '..', 'src', 'cli.ts'),
+          '--ndjson',
+          '--log-file',
+          logFile,
+          hostport,
+          'localhost:0'
+        ],
+        { stdio: 'pipe' }
+      );
       stdout = '';
       (proc.stdout as any).setEncoding('utf8');
-      (proc.stdout as any).on('data', (chunk: string) => { stdout += chunk; });
+      (proc.stdout as any).on('data', (chunk: string) => {
+        stdout += chunk;
+      });
       // Wait for listening event to appear in the log file
       const listening = await waitForLogEvent(logFile, 'listening');
       port = listening.addr.port;
@@ -159,18 +207,40 @@ describe('bin', function() {
     });
 
     afterEach(async () => {
-      await client.close();
-      proc.kill();
-      await once(proc, 'exit');
-      tmpDir[Symbol.dispose]();
+      await client?.close();
+      if (proc.exitCode === null && proc.signalCode === null) {
+        proc.kill();
+        await once(proc, 'exit');
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
     it('writes ndjson events to log file', async () => {
       await client.db('test').collection('test').findOne();
       const content = fs.readFileSync(logFile, 'utf8');
       const events = parseNdjsonLines(content);
-      assert(events.some((e) => e.ev === 'listening'), 'log file should contain listening event');
-      assert(events.some((e) => e.ev === 'commandForwarded'), 'log file should contain commandForwarded events');
+      assert(
+        events.some((e) => e.ev === 'listening'),
+        'log file should contain listening event'
+      );
+      assert(
+        events.some((e) => e.ev === 'commandForwarded'),
+        'log file should contain commandForwarded events'
+      );
+    });
+
+    it('closes connections, flushes the log and exits 0 on SIGTERM', async () => {
+      await client.db('test').collection('test').findOne();
+      const exited = once(proc, 'exit');
+      proc.kill('SIGTERM');
+      const [code, signal] = await exited;
+      assert.strictEqual(signal, null);
+      assert.strictEqual(code, 0);
+      const events = parseNdjsonLines(fs.readFileSync(logFile, 'utf8'));
+      assert(
+        events.some((e) => e.ev === 'connectionClosed'),
+        'log file should contain the connectionClosed events written during shutdown'
+      );
     });
 
     it('does not write ndjson to stdout when --log-file is used', async () => {
@@ -194,13 +264,20 @@ describe('bin', function() {
         .filter(Boolean);
 
     beforeEach(async () => {
-      proc = childProcess.spawn('ts-node', [
-        '-P', path.join(__dirname, '..', 'tsconfig.json'),
-        '-r', 'tsconfig-paths/register',
-        path.join(__dirname, '..', 'src', 'cli.ts'),
-        '--ndjson',
-        hostport, 'localhost:0'
-      ], { stdio: 'pipe' });
+      proc = childProcess.spawn(
+        'ts-node',
+        [
+          '-P',
+          path.join(__dirname, '..', 'tsconfig.json'),
+          '-r',
+          'tsconfig-paths/register',
+          path.join(__dirname, '..', 'src', 'cli.ts'),
+          '--ndjson',
+          hostport,
+          'localhost:0'
+        ],
+        { stdio: 'pipe' }
+      );
       port = 0;
       await new Promise<void>((resolve) => {
         stdout = '';
@@ -208,14 +285,16 @@ describe('bin', function() {
         (proc.stdout as any).on('data', (chunk: string) => {
           stdout += chunk;
           if (!port) {
-            const listening =
-              stdout.split('\n').map(line => {
+            const listening = stdout
+              .split('\n')
+              .map((line) => {
                 try {
                   return JSON.parse(line);
                 } catch {
                   return {};
                 }
-              }).find(line => line.ev === 'listening');
+              })
+              .find((line) => line.ev === 'listening');
             if (listening) {
               port = listening.addr.port;
               resolve();

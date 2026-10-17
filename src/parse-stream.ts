@@ -1,9 +1,11 @@
-import { ParseMessage } from '@src/parse';
+import { ParseMessage, MAX_MESSAGE_SIZE_BYTES } from '@src/parse';
 import { Writable } from 'stream';
 
 export class WireProtocolParser extends Writable {
   buffer: Uint8Array[];
   currentNeed: number;
+  // Messages longer than this, or that would decompress past it, are rejected as malformed
+  maxMessageSize = MAX_MESSAGE_SIZE_BYTES;
 
   constructor() {
     super();
@@ -18,7 +20,7 @@ export class WireProtocolParser extends Writable {
         this.currentNeed -= chunk.length;
       } else {
         const acc = Buffer.concat(this.buffer);
-        const result = await ParseMessage(acc);
+        const result = await ParseMessage(acc, this.maxMessageSize);
         if ('needBytes' in result) {
           this.buffer = [acc];
           this.currentNeed = result.needBytes;
