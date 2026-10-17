@@ -87,6 +87,9 @@ describe('Proxy close', function () {
   });
 });
 
+// Each test starts the proxy with ts-node --transpile-only: the test run and the build
+// already type-check src, and type-checking again in every proxy (slower still under
+// c8 coverage) would make up most of the suite's run time
 describe('bin', function () {
   this.timeout(10_000);
 
@@ -100,6 +103,7 @@ describe('bin', function () {
       proc = childProcess.spawn(
         'ts-node',
         [
+          '--transpile-only',
           '-P',
           path.join(__dirname, '..', 'tsconfig.json'),
           '-r',
@@ -182,6 +186,7 @@ describe('bin', function () {
       proc = childProcess.spawn(
         'ts-node',
         [
+          '--transpile-only',
           '-P',
           path.join(__dirname, '..', 'tsconfig.json'),
           '-r',
@@ -267,6 +272,7 @@ describe('bin', function () {
       proc = childProcess.spawn(
         'ts-node',
         [
+          '--transpile-only',
           '-P',
           path.join(__dirname, '..', 'tsconfig.json'),
           '-r',
