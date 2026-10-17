@@ -12,6 +12,9 @@ import * as random from '@src/utils/random';
 import sinon from 'sinon';
 import { SignJWT, generateKeyPair, exportJWK } from 'jose';
 
+// The mongod that mongodb-runner starts for the tests
+const hostport = process.env.MONGODB_HOSTPORT as string;
+
 // Mock JWTValidator for testing authenticated flows
 class MockJWTValidator extends JWTValidator {
   private mockResult: JWTValidationResult;
@@ -25,6 +28,55 @@ class MockJWTValidator extends JWTValidator {
   async validate(_token: string): Promise<JWTValidationResult> {
     return this.mockResult;
   }
+}
+
+// A validator that accepts any token as one for `user`
+function validFor(user: string, exp = Math.floor(Date.now() / 1000) + 3600): MockJWTValidator {
+  return new MockJWTValidator({ valid: true, subject: user, email: user, exp });
+}
+
+async function startProxy(validator?: JWTValidator, config: Partial<OIDCProxyConfig> = {}): Promise<OIDCProxy> {
+  const proxy = new OIDCProxy(
+    {
+      issuer: 'https://example.com',
+      clientId: 'test-client',
+      connectionString: `mongodb://${hostport}`,
+      listenPort: 0,
+      ...config
+    },
+    validator
+  );
+  await proxy.start();
+  return proxy;
+}
+
+// Creates a role per email, as an admin does to let that user log in
+async function createRoles(...roles: string[]): Promise<void> {
+  const admin = new MongoClient(`mongodb://${hostport}`);
+  try {
+    for (const role of roles) {
+      await admin
+        .db('admin')
+        .command({ createRole: role, privileges: [], roles: [] })
+        .catch((err) => {
+          if (!err.message.includes('already exists')) {
+            throw err;
+          }
+        });
+    }
+  } finally {
+    await admin.close();
+  }
+}
+
+// A MONGODB-OIDC saslStart command, by default carrying a token
+function saslStart(payload: Record<string, unknown> = { jwt: 'mock.jwt.token' }): Record<string, unknown> {
+  return {
+    saslStart: 1,
+    mechanism: 'MONGODB-OIDC',
+    payload: new Binary(Buffer.from(serialize(payload))),
+    $db: 'admin'
+  };
 }
 
 // Helper to build OP_MSG from a BSON document, plus a document sequence per entry of `sequences`
@@ -85,9 +137,32 @@ class ResponseReader {
   }
 }
 
-// Helper to wait for a complete MongoDB response (single use)
-function waitForResponse(client: net.Socket): Promise<Buffer> {
-  return new ResponseReader(client).read();
+// Connects a raw client and waits for the proxy side of the connection
+async function connect(proxy: OIDCProxy) {
+  const client = new net.Socket();
+  const reader = new ResponseReader(client);
+  const newConnection = once(proxy, 'newConnection');
+  const addr = proxy.address() as net.AddressInfo;
+  await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
+  const [conn] = await newConnection;
+  // Sends a command and returns its reply
+  const request = async (
+    doc: Record<string, unknown>,
+    requestId: number,
+    sequences?: Record<string, Record<string, unknown>[]>
+  ) => {
+    client.write(buildOpMsg(doc, requestId, sequences));
+    return deserialize((await reader.read()).subarray(21));
+  };
+  const login = (requestId: number) => request(saslStart(), requestId);
+  return { client, conn, reader, request, login };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await setTimeout(50);
+  }
 }
 
 describe('MessageBuilder', function () {
@@ -284,120 +359,49 @@ describe('MessageBuilder', function () {
 });
 
 describe('OIDCProxy', function () {
-  let hostport: string;
-
-  before(() => {
-    if (!process.env.MONGODB_HOSTPORT) {
-      throw new Error('MONGODB_HOSTPORT not set');
-    }
-    hostport = process.env.MONGODB_HOSTPORT;
-  });
+  before(() => createRoles('test-user@example.com'));
 
   describe('connection handling', () => {
     it('emits newConnection event on client connect', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-      const connectionPromise = once(proxy, 'newConnection');
-
-      const client = new net.Socket();
-      client.connect(addr.port, 'localhost');
-
-      const [connInfo] = await connectionPromise;
-      assert(typeof connInfo.connId === 'string' && connInfo.connId.length > 0);
-      assert(typeof connInfo.incoming === 'string');
+      const proxy = await startProxy();
+      const { client, conn } = await connect(proxy);
+      assert(typeof conn.connId === 'string' && conn.connId.length > 0);
+      assert(typeof conn.incoming === 'string');
 
       client.destroy();
       await proxy.stop();
     });
 
     it('emits connectionClosed event on client disconnect', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      client.connect(addr.port, 'localhost');
-      const [conn] = await once(proxy, 'newConnection');
-
-      const closePromise = once(conn, 'connectionClosed');
+      const proxy = await startProxy();
+      const { client, conn } = await connect(proxy);
+      const closed = once(conn, 'connectionClosed');
       client.destroy();
-
-      await closePromise;
-      assert(typeof conn.connId === 'string' && conn.connId.length > 0);
+      await closed;
 
       await proxy.stop();
     });
 
     it('respects maxConnections limit', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0,
-        maxConnections: 2
-      };
-
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      // Connect 2 clients (at the limit)
-      const client1 = new net.Socket();
-      const client2 = new net.Socket();
-      client1.connect(addr.port, 'localhost');
-      client2.connect(addr.port, 'localhost');
-      await once(proxy, 'newConnection');
-      await once(proxy, 'newConnection');
+      const proxy = await startProxy(undefined, { maxConnections: 2 });
+      const a = await connect(proxy);
+      const b = await connect(proxy);
 
       // Third connection should be rejected
-      const client3 = new net.Socket();
-      const closePromise = once(client3, 'close');
-      client3.connect(addr.port, 'localhost');
-      await closePromise;
+      const client = new net.Socket();
+      const closed = once(client, 'close');
+      client.connect((proxy.address() as net.AddressInfo).port, 'localhost');
+      await closed;
 
-      client1.destroy();
-      client2.destroy();
+      a.client.destroy();
+      b.client.destroy();
       await proxy.stop();
     });
 
     it('emits connectionTimeout on idle connections', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0,
-        connectionTimeoutMs: 10 // Very short timeout for testing
-      };
-
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      client.connect(addr.port, 'localhost');
-      const [conn] = await once(proxy, 'newConnection');
-
+      const proxy = await startProxy(undefined, { connectionTimeoutMs: 100 });
+      const { conn } = await connect(proxy);
       await once(conn, 'connectionTimeout');
-      assert(typeof conn.connId === 'string' && conn.connId.length > 0);
 
       await proxy.stop();
     });
@@ -405,104 +409,40 @@ describe('OIDCProxy', function () {
 
   describe('provisioning cache and deduplication', () => {
     const email = 'cache-test@example.com';
-    let adminClient: MongoClient;
 
-    before(async () => {
-      adminClient = new MongoClient(`mongodb://${hostport}`);
-      await adminClient.connect();
-      await adminClient.db('admin').command({
-        createRole: email,
-        privileges: [],
-        roles: []
-      });
-    });
+    before(() => createRoles(email));
 
     after(async () => {
-      const adminDb = adminClient.db('admin');
-      await adminDb.command({ dropUser: email }).catch(() => {});
-      await adminDb.command({ dropRole: email }).catch(() => {});
-      await adminClient.close();
+      const admin = new MongoClient(`mongodb://${hostport}`);
+      await admin
+        .db('admin')
+        .command({ dropUser: email })
+        .catch(() => {});
+      await admin.db('admin').command({ dropRole: email });
+      await admin.close();
     });
 
     it('reuses cached password for repeated provisions', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: true,
-        subject: email,
-        email: email,
-        exp: Math.floor(Date.now() / 1000) + 3600
-      });
-
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
+      const proxy = await startProxy(validFor(email));
 
       // First auth - creates user with new password
-      const client1 = new net.Socket();
-      const reader1 = new ResponseReader(client1);
-      await new Promise<void>((resolve) => client1.connect(addr.port, 'localhost', resolve));
-
-      client1.write(
-        buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-          $db: 'admin'
-        })
-      );
-      await reader1.read();
+      const first = await connect(proxy);
+      await first.login(1);
       const firstPassword = (proxy as any).userPasswordCache.get(email);
-      client1.destroy();
+      first.client.destroy();
 
       // Second auth - should reuse cached password
-      const client2 = new net.Socket();
-      const reader2 = new ResponseReader(client2);
-      await new Promise<void>((resolve) => client2.connect(addr.port, 'localhost', resolve));
-
-      client2.write(
-        buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-          $db: 'admin'
-        })
-      );
-      await reader2.read();
-      const secondPassword = (proxy as any).userPasswordCache.get(email);
-      client2.destroy();
-
-      assert.strictEqual(firstPassword, secondPassword);
+      const second = await connect(proxy);
+      await second.login(1);
+      assert.strictEqual((proxy as any).userPasswordCache.get(email), firstPassword);
+      second.client.destroy();
 
       await proxy.stop();
     });
 
     it('deduplicates concurrent provisions of the same user', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: true,
-        subject: email,
-        email: email,
-        exp: Math.floor(Date.now() / 1000) + 3600
-      });
-
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
+      const proxy = await startProxy(validFor(email));
       (proxy as any).userPasswordCache.clear();
-
-      const addr = proxy.address() as net.AddressInfo;
 
       let calls = 0;
       const stub = sinon.stub(random, 'randomBytes').callsFake((size: number) => {
@@ -511,32 +451,11 @@ describe('OIDCProxy', function () {
       });
 
       try {
-        // Connect two clients simultaneously
-        const client1 = new net.Socket();
-        const client2 = new net.Socket();
-        const reader1 = new ResponseReader(client1);
-        const reader2 = new ResponseReader(client2);
-
-        await Promise.all([
-          new Promise<void>((resolve) => client1.connect(addr.port, 'localhost', resolve)),
-          new Promise<void>((resolve) => client2.connect(addr.port, 'localhost', resolve))
-        ]);
-
-        // Send auth requests concurrently
-        const authMsg = buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-          $db: 'admin'
-        });
-
-        client1.write(authMsg);
-        client2.write(authMsg);
-
-        await Promise.all([reader1.read(), reader2.read()]);
-
-        client1.destroy();
-        client2.destroy();
+        const a = await connect(proxy);
+        const b = await connect(proxy);
+        await Promise.all([a.login(1), b.login(1)]);
+        a.client.destroy();
+        b.client.destroy();
 
         // Concurrent logins share one client creation - only one password generation
         assert.strictEqual(calls, 1);
@@ -548,52 +467,11 @@ describe('OIDCProxy', function () {
   });
 
   describe('hello handling and command error logging', () => {
-    before(async () => {
-      const adminClient = new MongoClient(`mongodb://${hostport}`);
-      await adminClient.connect();
-      try {
-        await adminClient.db('admin').command({
-          createRole: 'test-user@example.com',
-          privileges: [],
-          roles: []
-        });
-      } catch (err: any) {
-        if (err.code !== 11000 && !err.message.includes('already exists')) {
-          throw err;
-        }
-      } finally {
-        await adminClient.close();
-      }
-    });
-
     it('responds to hello command with OIDC mechanism', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      const proxy = await startProxy();
+      const { client, request } = await connect(proxy);
 
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const msg = buildOpMsg({ hello: 1, $db: 'admin' });
-
-      const client = new net.Socket();
-      const responsePromise = waitForResponse(client);
-
-      client.connect(addr.port, 'localhost', () => {
-        client.write(msg);
-      });
-
-      const response = await responsePromise;
-
-      // Parse response
-      const bsonData = response.subarray(21);
-      const parsed = deserialize(bsonData);
-
+      const parsed = await request({ hello: 1, $db: 'admin' }, 1);
       assert.strictEqual(parsed.ismaster, true);
       assert.strictEqual(parsed.ok, 1);
       assert.deepStrictEqual(parsed.saslSupportedMechs, ['MONGODB-OIDC']);
@@ -603,61 +481,20 @@ describe('OIDCProxy', function () {
     });
 
     it('emits commandError with db/cmd on failing command', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: true,
-        subject: 'test-user@example.com',
-        email: 'test-user@example.com',
-        exp: Math.floor(Date.now() / 1000) + 3600
-      });
+      const proxy = await startProxy(validFor('test-user@example.com'));
+      const { client, conn, request, login } = await connect(proxy);
+      const commandError = once(conn, 'commandError');
 
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      assert.strictEqual((await login(1)).ok, 1);
+      await request({ doesNotExist: 1, $db: 'admin' }, 2);
 
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const reader = new ResponseReader(client);
-      // Listen before connecting: the proxy can emit newConnection before the connect callback runs
-      const newConnection = once(proxy, 'newConnection');
-      await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
-
-      const [conn] = await newConnection;
-      const commandErrorPromise = once(conn, 'commandError');
-      const authSuccessPromise = once(conn, 'authSuccess');
-
-      // Authenticate
-      const saslStartMsg = buildOpMsg(
-        {
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-          $db: 'admin'
-        },
-        1
-      );
-
-      client.write(saslStartMsg);
-      await reader.read(); // Wait for auth response
-      await authSuccessPromise;
-
-      // Send an invalid command (requestId 2)
-      const invalidCmd = buildOpMsg({ doesNotExist: 1, $db: 'admin' }, 2);
-      client.write(invalidCmd);
-
-      const [user, error, dbName, cmdName, request] = await commandErrorPromise;
+      const [user, error, dbName, cmdName, command] = await commandError;
       assert.strictEqual(user, 'test-user@example.com');
       assert.strictEqual(dbName, 'admin');
       assert.strictEqual(cmdName, 'doesNotExist');
       assert.strictEqual(typeof error, 'string');
       assert(error.length > 0);
-      assert.deepStrictEqual(request?.doesNotExist, 1);
+      assert.deepStrictEqual(command?.doesNotExist, 1);
 
       client.destroy();
       await proxy.stop();
@@ -666,36 +503,10 @@ describe('OIDCProxy', function () {
 
   describe('SASL authentication flow', () => {
     it('returns IdP info on saslStart without JWT', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://auth.example.com',
-        clientId: 'my-client-id',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      const proxy = await startProxy(undefined, { issuer: 'https://auth.example.com', clientId: 'my-client-id' });
+      const { client, request } = await connect(proxy);
 
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const msg = buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({}))),
-        $db: 'admin'
-      });
-
-      const client = new net.Socket();
-      const responsePromise = waitForResponse(client);
-
-      client.connect(addr.port, 'localhost', () => {
-        client.write(msg);
-      });
-
-      const response = await responsePromise;
-      const bsonData = response.subarray(21);
-      const parsed = deserialize(bsonData);
-
+      const parsed = await request(saslStart({}), 1);
       assert.strictEqual(parsed.ok, 1);
       assert.strictEqual(parsed.done, false);
       assert(typeof parsed.conversationId === 'number');
@@ -711,35 +522,12 @@ describe('OIDCProxy', function () {
     });
 
     it('emits saslStart event when returning IdP info', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      const proxy = await startProxy();
+      const { client, conn, request } = await connect(proxy);
+      const saslStartEvent = once(conn, 'saslStart');
 
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const connectionPromise = once(proxy, 'newConnection');
-
-      client.connect(addr.port, 'localhost');
-      const [conn] = await connectionPromise;
-
-      const saslStartPromise = once(conn, 'saslStart');
-
-      const msg = buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({}))),
-        $db: 'admin'
-      });
-      client.write(msg);
-
-      const [idpInfo] = await saslStartPromise;
+      await request(saslStart({}), 1);
+      const [idpInfo] = await saslStartEvent;
       assert.strictEqual(idpInfo.issuer, 'https://example.com');
       assert.strictEqual(idpInfo.clientId, 'test-client');
 
@@ -748,42 +536,12 @@ describe('OIDCProxy', function () {
     });
 
     it('emits authAttempt event when JWT is provided', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: true,
-        subject: 'test-user@example.com',
-        email: 'test-user@example.com',
-        exp: Math.floor(Date.now() / 1000) + 3600
-      });
+      const proxy = await startProxy(validFor('test-user@example.com'));
+      const { client, conn, login } = await connect(proxy);
+      const authAttempt = once(conn, 'authAttempt');
 
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const connectionPromise = once(proxy, 'newConnection');
-
-      client.connect(addr.port, 'localhost');
-      const [conn] = await connectionPromise;
-
-      const authAttemptPromise = once(conn, 'authAttempt');
-
-      const msg = buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-        $db: 'admin'
-      });
-      client.write(msg);
-
-      const [user, jwt] = await authAttemptPromise;
+      await login(1);
+      const [user, jwt] = await authAttempt;
       // user can be undefined, null, or string (email from decoded JWT)
       assert(user === undefined || user === null || typeof user === 'string');
       // jwt can be null or object (decoded JWT payload)
@@ -794,73 +552,26 @@ describe('OIDCProxy', function () {
     });
 
     it('rejects commands without authentication', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      const proxy = await startProxy();
+      const { client, conn, request } = await connect(proxy);
+      const authRequired = once(conn, 'authRequired');
 
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const msg = buildOpMsg({ find: 'test', $db: 'test' });
-
-      const client = new net.Socket();
-      const connectionPromise = once(proxy, 'newConnection');
-
-      client.connect(addr.port, 'localhost');
-      const [conn] = await connectionPromise;
-
-      const authRequiredPromise = once(conn, 'authRequired');
-      const responsePromise = waitForResponse(client);
-
-      client.write(msg);
-
-      const [cmdName] = await authRequiredPromise;
-      assert.strictEqual(cmdName, 'find');
-
-      const response = await responsePromise;
-      const bsonData = response.subarray(21);
-      const parsed = deserialize(bsonData);
-
+      const parsed = await request({ find: 'test', $db: 'test' }, 1);
       assert.strictEqual(parsed.ok, 0);
       assert.strictEqual(parsed.code, 13);
       assert(parsed.errmsg.includes('Authentication required'));
+      const [cmdName] = await authRequired;
+      assert.strictEqual(cmdName, 'find');
 
       client.destroy();
       await proxy.stop();
     });
 
     it('allows ping without authentication', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      const proxy = await startProxy();
+      const { client, request } = await connect(proxy);
 
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const msg = buildOpMsg({ ping: 1, $db: 'admin' });
-
-      const client = new net.Socket();
-      const responsePromise = waitForResponse(client);
-
-      client.connect(addr.port, 'localhost', () => {
-        client.write(msg);
-      });
-
-      const response = await responsePromise;
-      const bsonData = response.subarray(21);
-      const parsed = deserialize(bsonData);
-
-      assert.strictEqual(parsed.ok, 1);
+      assert.strictEqual((await request({ ping: 1, $db: 'admin' }, 1)).ok, 1);
 
       client.destroy();
       await proxy.stop();
@@ -869,37 +580,19 @@ describe('OIDCProxy', function () {
 
   describe('saslContinue handling', () => {
     it('rejects saslContinue with invalid conversationId', async () => {
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
+      const proxy = await startProxy();
+      const { client, request } = await connect(proxy);
 
       // Send saslContinue without prior saslStart (conversationId won't match)
-      const msg = buildOpMsg({
-        saslContinue: 1,
-        conversationId: 999, // Invalid - no saslStart was done
-        payload: new Binary(Buffer.from(serialize({ jwt: 'fake.jwt.token' }))),
-        $db: 'admin'
-      });
-
-      const client = new net.Socket();
-      const responsePromise = waitForResponse(client);
-
-      client.connect(addr.port, 'localhost', () => {
-        client.write(msg);
-      });
-
-      const response = await responsePromise;
-      const bsonData = response.subarray(21);
-      const parsed = deserialize(bsonData);
-
+      const parsed = await request(
+        {
+          saslContinue: 1,
+          conversationId: 999, // Invalid - no saslStart was done
+          payload: new Binary(Buffer.from(serialize({ jwt: 'fake.jwt.token' }))),
+          $db: 'admin'
+        },
+        1
+      );
       assert.strictEqual(parsed.ok, 0);
       assert(parsed.errmsg.includes('Invalid conversationId'));
 
@@ -1192,83 +885,22 @@ describe('JWTValidator with real keys', function () {
 describe('OIDCProxy with mock validator', function () {
   this.timeout(10_000);
 
-  let hostport: string;
-
-  before(() => {
-    if (!process.env.MONGODB_HOSTPORT) {
-      throw new Error('MONGODB_HOSTPORT not set');
-    }
-    hostport = process.env.MONGODB_HOSTPORT;
-  });
+  before(() => createRoles('test-user@example.com', 'other-user@example.com'));
 
   describe('successful authentication via saslStart', () => {
-    before(async () => {
-      const client = new MongoClient(`mongodb://${hostport}`);
-      await client.connect();
-      try {
-        await client.db('admin').command({
-          createRole: 'test-user@example.com',
-          privileges: [],
-          roles: []
-        });
-      } catch (err: any) {
-        if (err.code !== 11000 && !err.message.includes('already exists')) {
-          throw err;
-        }
-      } finally {
-        await client.close();
-      }
-    });
-
     it('authenticates when JWT is valid in saslStart payload', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: true,
-        subject: 'test-user@example.com',
-        email: 'test-user@example.com',
-        exp: Math.floor(Date.now() / 1000) + 3600 // 1 hour from now
-      });
+      const proxy = await startProxy(validFor('test-user@example.com'));
+      const { client, conn, login } = await connect(proxy);
+      const authSuccess = once(conn, 'authSuccess');
 
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      const parsed = await login(1);
+      assert.strictEqual(parsed.ok, 1);
+      assert.strictEqual(parsed.done, true); // Auth complete
 
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const connectionPromise = once(proxy, 'newConnection');
-
-      client.connect(addr.port, 'localhost');
-      const [conn] = await connectionPromise;
-
-      const authSuccessPromise = once(conn, 'authSuccess');
-      const responsePromise = waitForResponse(client);
-
-      // Send saslStart with a JWT in payload
-      const msg = buildOpMsg({
-        saslStart: 1,
-        mechanism: 'MONGODB-OIDC',
-        payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-        $db: 'admin'
-      });
-      client.write(msg);
-
-      const [user, subject] = await authSuccessPromise;
+      const [user, subject] = await authSuccess;
       assert.strictEqual(user, 'test-user@example.com');
       assert(subject.includes('test-user@example.com'));
       assert.strictEqual(conn.getUser(), 'test-user@example.com');
-
-      const response = await responsePromise;
-      const bsonData = response.subarray(21);
-      const parsed = deserialize(bsonData);
-
-      assert.strictEqual(parsed.ok, 1);
-      assert.strictEqual(parsed.done, true); // Auth complete
 
       client.destroy();
       await proxy.stop();
@@ -1277,41 +909,10 @@ describe('OIDCProxy with mock validator', function () {
 
   describe('saslStart without JWT', () => {
     it('returns IdP info when no JWT in payload', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: true,
-        subject: 'test-user@example.com',
-        email: 'test-user@example.com',
-        exp: Math.floor(Date.now() / 1000) + 3600
-      });
+      const proxy = await startProxy(validFor('test-user@example.com'));
+      const { client, request } = await connect(proxy);
 
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const responsePromise = waitForResponse(client);
-
-      client.connect(addr.port, 'localhost', () => {
-        const msg = buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({}))),
-          $db: 'admin'
-        });
-        client.write(msg);
-      });
-
-      const response = await responsePromise;
-      const parsed = deserialize(response.subarray(21));
-
+      const parsed = await request(saslStart({}), 1);
       assert.strictEqual(parsed.ok, 1);
       assert.strictEqual(parsed.done, false);
       assert(typeof parsed.conversationId === 'number');
@@ -1323,53 +924,14 @@ describe('OIDCProxy with mock validator', function () {
 
   describe('command forwarding after auth', () => {
     it('emits commandForwarded event on successful forward', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: true,
-        subject: 'test-user@example.com',
-        email: 'test-user@example.com',
-        exp: Math.floor(Date.now() / 1000) + 3600
-      });
+      const proxy = await startProxy(validFor('test-user@example.com'));
+      const { client, conn, request, login } = await connect(proxy);
+      const commandForwarded = once(conn, 'commandForwarded');
 
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      await login(1);
+      await request({ find: 'test', $db: 'test' }, 2);
 
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const reader = new ResponseReader(client);
-      // Listen before connecting: the proxy can emit newConnection before the connect callback runs
-      const newConnection = once(proxy, 'newConnection');
-      await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
-
-      const [conn] = await newConnection;
-      const commandForwardedPromise = once(conn, 'commandForwarded');
-
-      // Authenticate
-      const saslStartMsg = buildOpMsg(
-        {
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-          $db: 'admin'
-        },
-        1
-      );
-
-      client.write(saslStartMsg);
-      await reader.read(); // Wait for auth response
-
-      // Send a find command (requestId 2)
-      const findMsg = buildOpMsg({ find: 'test', $db: 'test' }, 2);
-      client.write(findMsg);
-
-      const [user, dbName, cmdName, , , requestBytes, responseBytes] = await commandForwardedPromise;
+      const [user, dbName, cmdName, , , requestBytes, responseBytes] = await commandForwarded;
       assert.strictEqual(user, 'test-user@example.com');
       assert.strictEqual(dbName, 'test');
       assert.strictEqual(cmdName, 'find');
@@ -1385,53 +947,15 @@ describe('OIDCProxy with mock validator', function () {
 
   describe('token expiration handling', () => {
     it('returns reauth error when token is expired', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: true,
-        subject: 'test-user@example.com',
-        email: 'test-user@example.com',
-        exp: Math.floor(Date.now() / 1000) - 10 // Already expired
-      });
+      const proxy = await startProxy(validFor('test-user@example.com', Math.floor(Date.now() / 1000) - 10));
+      const { client, conn, request, login } = await connect(proxy);
+      const reauthRequired = once(conn, 'reauthRequired');
 
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
+      // Authenticate (will succeed but token is expired), then send a command
+      await login(1);
+      await request({ find: 'test', $db: 'test' }, 2);
 
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const reader = new ResponseReader(client);
-      // Listen before connecting: the proxy can emit newConnection before the connect callback runs
-      const newConnection = once(proxy, 'newConnection');
-      await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
-
-      const [conn] = await newConnection;
-      const reauthPromise = once(conn, 'reauthRequired');
-
-      // Authenticate (will succeed but token is expired)
-      const saslStartMsg = buildOpMsg(
-        {
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-          $db: 'admin'
-        },
-        1
-      );
-
-      client.write(saslStartMsg);
-      await reader.read(); // Wait for auth response
-
-      // Send a command - should trigger reauth
-      const findMsg = buildOpMsg({ find: 'test', $db: 'test' }, 2);
-      client.write(findMsg);
-
-      const [user, reason] = await reauthPromise;
+      const [user, reason] = await reauthRequired;
       assert.strictEqual(user, 'test-user@example.com');
       assert(reason.includes('expired'));
 
@@ -1440,41 +964,12 @@ describe('OIDCProxy with mock validator', function () {
     });
 
     it('returns reauth error when saslStart JWT is expired', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: false,
-        errorCode: JWTValidationError.EXPIRED,
-        error: 'Token expired'
-      });
+      const proxy = await startProxy(
+        new MockJWTValidator({ valid: false, errorCode: JWTValidationError.EXPIRED, error: 'Token expired' })
+      );
+      const { client, login } = await connect(proxy);
 
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const responsePromise = waitForResponse(client);
-
-      client.connect(addr.port, 'localhost', () => {
-        const msg = buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'expired.jwt.token' }))),
-          $db: 'admin'
-        });
-        client.write(msg);
-      });
-
-      const response = await responsePromise;
-      const bsonData = response.subarray(21);
-      const parsed = deserialize(bsonData);
-
+      const parsed = await login(1);
       assert.strictEqual(parsed.ok, 0);
       assert.strictEqual(parsed.code, 391); // ReauthenticationRequired
       assert(parsed.errmsg.includes('Reauthentication required'));
@@ -1488,76 +983,9 @@ describe('OIDCProxy with mock validator', function () {
     const email = 'test-user@example.com';
     const otherEmail = 'other-user@example.com';
 
-    const config = (overrides: Partial<OIDCProxyConfig> = {}): OIDCProxyConfig => ({
-      issuer: 'https://example.com',
-      clientId: 'test-client',
-      connectionString: `mongodb://${hostport}`,
-      listenPort: 0,
-      ...overrides
-    });
-
-    const validFor = (user: string, exp = Math.floor(Date.now() / 1000) + 3600) =>
-      new MockJWTValidator({ valid: true, subject: user, email: user, exp });
-
-    // Connects a raw client and waits for the proxy side of the connection
-    async function connect(proxy: OIDCProxy) {
-      const client = new net.Socket();
-      const reader = new ResponseReader(client);
-      const newConnection = once(proxy, 'newConnection');
-      const addr = proxy.address() as net.AddressInfo;
-      await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
-      const [conn] = await newConnection;
-      const request = async (
-        doc: Record<string, unknown>,
-        requestId: number,
-        sequences?: Record<string, Record<string, unknown>[]>
-      ) => {
-        client.write(buildOpMsg(doc, requestId, sequences));
-        return deserialize((await reader.read()).subarray(21));
-      };
-      const login = (requestId: number) =>
-        request(
-          {
-            saslStart: 1,
-            mechanism: 'MONGODB-OIDC',
-            payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-            $db: 'admin'
-          },
-          requestId
-        );
-      return { client, conn, request, login };
-    }
-
-    async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
-      const deadline = Date.now() + timeoutMs;
-      while (!predicate() && Date.now() < deadline) {
-        await setTimeout(50);
-      }
-    }
-
-    before(async () => {
-      const client = new MongoClient(`mongodb://${hostport}`);
-      await client.connect();
-      try {
-        for (const role of [email, otherEmail]) {
-          await client
-            .db('admin')
-            .command({ createRole: role, privileges: [], roles: [] })
-            .catch((err) => {
-              if (err.code !== 11000 && !err.message.includes('already exists')) {
-                throw err;
-              }
-            });
-        }
-      } finally {
-        await client.close();
-      }
-    });
-
     it('logs a command as the user who sent it when the connection reauthenticates as another user', async () => {
       const mockValidator = validFor(email);
-      const proxy = new OIDCProxy(config(), mockValidator);
-      await proxy.start();
+      const proxy = await startProxy(mockValidator);
       const { client, conn, login } = await connect(proxy);
 
       try {
@@ -1598,8 +1026,7 @@ describe('OIDCProxy with mock validator', function () {
 
     it('releases the user backend client when reauthentication is required and provisions a new one', async () => {
       const mockValidator = validFor(email, Math.floor(Date.now() / 1000) - 10); // Already expired
-      const proxy = new OIDCProxy(config(), mockValidator);
-      await proxy.start();
+      const proxy = await startProxy(mockValidator);
       const { client, conn, request, login } = await connect(proxy);
 
       try {
@@ -1634,8 +1061,7 @@ describe('OIDCProxy with mock validator', function () {
     });
 
     it('keeps one backend client when reauthenticating an authenticated connection', async () => {
-      const proxy = new OIDCProxy(config(), validFor(email));
-      await proxy.start();
+      const proxy = await startProxy(validFor(email));
       const { client, conn, login } = await connect(proxy);
 
       try {
@@ -1660,8 +1086,7 @@ describe('OIDCProxy with mock validator', function () {
     });
 
     it('shares one backend client between connections of the same user', async () => {
-      const proxy = new OIDCProxy(config(), validFor(email));
-      await proxy.start();
+      const proxy = await startProxy(validFor(email));
       const a = await connect(proxy);
       const b = await connect(proxy);
 
@@ -1688,8 +1113,7 @@ describe('OIDCProxy with mock validator', function () {
     });
 
     it('rejects logins beyond maxConnectionsPerUser', async () => {
-      const proxy = new OIDCProxy(config({ maxConnectionsPerUser: 1 }), validFor(email));
-      await proxy.start();
+      const proxy = await startProxy(validFor(email), { maxConnectionsPerUser: 1 });
       const a = await connect(proxy);
       const b = await connect(proxy);
 
@@ -1719,8 +1143,7 @@ describe('OIDCProxy with mock validator', function () {
         privileges: [{ resource: { db: 'test', collection: 'sequences' }, actions: ['insert'] }],
         roles: []
       });
-      const proxy = new OIDCProxy(config(), validFor(user));
-      await proxy.start();
+      const proxy = await startProxy(validFor(user));
       const { client, conn, request, login } = await connect(proxy);
 
       try {
@@ -1764,8 +1187,7 @@ describe('OIDCProxy with mock validator', function () {
         return validate(token);
       });
 
-      const proxy = new OIDCProxy(config(), mockValidator);
-      await proxy.start();
+      const proxy = await startProxy(mockValidator);
 
       const addr = proxy.address() as net.AddressInfo;
 
@@ -1777,17 +1199,7 @@ describe('OIDCProxy with mock validator', function () {
         await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
         [conn] = await newConnection;
 
-        client.write(
-          buildOpMsg(
-            {
-              saslStart: 1,
-              mechanism: 'MONGODB-OIDC',
-              payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-              $db: 'admin'
-            },
-            1
-          )
-        );
+        client.write(buildOpMsg(saslStart(), 1));
 
         const provisioned = (): MongoClient | undefined => connectSpy.thisValues[0];
         await waitFor(() => !!provisioned() && closeSpy.calledOn(provisioned()));
@@ -1803,8 +1215,7 @@ describe('OIDCProxy with mock validator', function () {
     });
 
     it('fails the request instead of crashing when provisioning errors', async () => {
-      const proxy = new OIDCProxy(config(), validFor(email));
-      await proxy.start();
+      const proxy = await startProxy(validFor(email));
       const dbStub = sinon.stub((proxy as any).backendClient, 'db').returns({
         command: async () => {
           throw new Error('backend unavailable');
@@ -1832,8 +1243,7 @@ describe('OIDCProxy with mock validator', function () {
     });
 
     it('closes the connection on a malformed message', async () => {
-      const proxy = new OIDCProxy(config(), validFor(email));
-      await proxy.start();
+      const proxy = await startProxy(validFor(email));
       const { client, conn } = await connect(proxy);
 
       try {
@@ -1855,8 +1265,7 @@ describe('OIDCProxy with mock validator', function () {
 
     describe('message size limit', () => {
       it('closes a connection that sends a message over 16 KB before login', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
+        const proxy = await startProxy(validFor(email));
         const { client, conn } = await connect(proxy);
 
         try {
@@ -1878,8 +1287,7 @@ describe('OIDCProxy with mock validator', function () {
       });
 
       it('closes a connection whose compressed message would expand past 16 KB before login', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
+        const proxy = await startProxy(validFor(email));
         const { client, conn } = await connect(proxy);
 
         try {
@@ -1899,10 +1307,8 @@ describe('OIDCProxy with mock validator', function () {
       });
 
       it('accepts a small compressed message before login', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
-        const { client } = await connect(proxy);
-        const reader = new ResponseReader(client);
+        const proxy = await startProxy(validFor(email));
+        const { client, reader } = await connect(proxy);
 
         try {
           client.write(await new MessageBuilder().compress(buildOpMsg({ hello: 1, $db: 'admin' }, 1)));
@@ -1916,8 +1322,7 @@ describe('OIDCProxy with mock validator', function () {
       });
 
       it('accepts messages over 16 KB after login', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
+        const proxy = await startProxy(validFor(email));
         const { client, request, login } = await connect(proxy);
 
         try {
@@ -1933,8 +1338,7 @@ describe('OIDCProxy with mock validator', function () {
 
     describe('compression', () => {
       it('offers zlib in hello only when the client asks for it', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
+        const proxy = await startProxy(validFor(email));
         const { client, request } = await connect(proxy);
 
         try {
@@ -1951,8 +1355,7 @@ describe('OIDCProxy with mock validator', function () {
       });
 
       it('serves a driver using zlib compression and compresses its replies', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
+        const proxy = await startProxy(validFor(email));
         const compressSpy = sinon.spy(MessageBuilder.prototype, 'compress');
         const forwarded: string[] = [];
         proxy.on('newConnection', (conn) =>
@@ -1977,13 +1380,11 @@ describe('OIDCProxy with mock validator', function () {
       });
 
       it('rejects a compressor it does not offer', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
-        const { client, login } = await connect(proxy);
+        const proxy = await startProxy(validFor(email));
+        const { client, reader, login } = await connect(proxy);
 
         try {
           await login(1);
-          const reader = new ResponseReader(client);
           const message = await new MessageBuilder().compress(buildOpMsg({ ping: 1, $db: 'admin' }, 2));
           message.writeUInt8(1, 16 + 8); // compressor id: snappy
           client.write(message);
@@ -1999,8 +1400,7 @@ describe('OIDCProxy with mock validator', function () {
 
     describe('stop', () => {
       it('closes open connections, reporting each close once', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
+        const proxy = await startProxy(validFor(email));
         const a = await connect(proxy);
         const b = await connect(proxy);
 
@@ -2024,8 +1424,7 @@ describe('OIDCProxy with mock validator', function () {
       });
 
       it('lets a running command finish and reply before closing its connection', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
+        const proxy = await startProxy(validFor(email));
         const { client, conn, request, login } = await connect(proxy);
 
         try {
@@ -2060,8 +1459,7 @@ describe('OIDCProxy with mock validator', function () {
       });
 
       it('interrupts a command that outlives the drain timeout and reports it', async () => {
-        const proxy = new OIDCProxy(config(), validFor(email));
-        await proxy.start();
+        const proxy = await startProxy(validFor(email));
         const { client, conn, login } = await connect(proxy);
 
         try {
@@ -2096,41 +1494,11 @@ describe('OIDCProxy with mock validator', function () {
   describe('login authorization', () => {
     let adminClient: MongoClient;
 
-    const config = (): OIDCProxyConfig => ({
-      issuer: 'https://example.com',
-      clientId: 'test-client',
-      connectionString: `mongodb://${hostport}`,
-      listenPort: 0
-    });
-
     async function loginAs(user: string): Promise<Record<string, any>> {
-      const proxy = new OIDCProxy(
-        config(),
-        new MockJWTValidator({
-          valid: true,
-          subject: user,
-          email: user,
-          exp: Math.floor(Date.now() / 1000) + 3600
-        })
-      );
-      await proxy.start();
-      const addr = proxy.address() as net.AddressInfo;
-      const client = new net.Socket();
-      const reader = new ResponseReader(client);
+      const proxy = await startProxy(validFor(user));
+      const { client, login } = await connect(proxy);
       try {
-        await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
-        client.write(
-          buildOpMsg(
-            {
-              saslStart: 1,
-              mechanism: 'MONGODB-OIDC',
-              payload: new Binary(Buffer.from(serialize({ jwt: 'mock.jwt.token' }))),
-              $db: 'admin'
-            },
-            1
-          )
-        );
-        return deserialize((await reader.read()).subarray(21));
+        return await login(1);
       } finally {
         client.destroy();
         await proxy.stop();
@@ -2225,90 +1593,14 @@ describe('OIDCProxy with mock validator', function () {
   });
 
   describe('auth failure handling', () => {
-    it('returns error when email claim is missing', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: false,
-        errorCode: JWTValidationError.INVALID,
-        error: 'Email claim must be a non-empty string'
-      });
+    // An invalid token that has not expired gets the IdP info back, so the client can get a new token
+    it('returns IdP info when the JWT in saslStart is invalid', async () => {
+      const proxy = await startProxy(
+        new MockJWTValidator({ valid: false, errorCode: JWTValidationError.INVALID, error: 'Invalid signature' })
+      );
+      const { client, login } = await connect(proxy);
 
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      const client = new net.Socket();
-      const responsePromise = waitForResponse(client);
-
-      client.connect(addr.port, 'localhost', () => {
-        const msg = buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'no.email.jwt.token' }))),
-          $db: 'admin'
-        });
-        client.write(msg);
-      });
-
-      const response = await responsePromise;
-      const parsed = deserialize(response.subarray(21));
-
-      // It should fall back to IdP info for retry, or return error?
-      // Current OIDCProxy logic for !result.valid in saslStart:
-      // if (result.errorCode === JWTValidationError.EXPIRED) -> sendReauthRequired (391)
-      // otherwise -> return IdP info (ok: 1, done: false)
-      assert.strictEqual(parsed.ok, 1);
-      assert.strictEqual(parsed.done, false);
-
-      client.destroy();
-      await proxy.stop();
-    });
-
-    it('returns error when JWT is invalid in saslStart', async () => {
-      const mockValidator = new MockJWTValidator({
-        valid: false,
-        errorCode: JWTValidationError.INVALID,
-        error: 'Invalid signature'
-      });
-
-      const config: OIDCProxyConfig = {
-        issuer: 'https://example.com',
-        clientId: 'test-client',
-        connectionString: `mongodb://${hostport}`,
-        listenPort: 0
-      };
-
-      const proxy = new OIDCProxy(config, mockValidator);
-      await proxy.start();
-
-      const addr = proxy.address() as net.AddressInfo;
-
-      // When JWT is invalid in saslStart, it falls back to returning IdP info
-      // (so client can get a new token)
-      const client = new net.Socket();
-      const responsePromise = waitForResponse(client);
-
-      client.connect(addr.port, 'localhost', () => {
-        const msg = buildOpMsg({
-          saslStart: 1,
-          mechanism: 'MONGODB-OIDC',
-          payload: new Binary(Buffer.from(serialize({ jwt: 'invalid.jwt.token' }))),
-          $db: 'admin'
-        });
-        client.write(msg);
-      });
-
-      const response = await responsePromise;
-      const parsed = deserialize(response.subarray(21));
-
-      // Since JWT was invalid (not expired), it returns IdP info for retry
+      const parsed = await login(1);
       assert.strictEqual(parsed.ok, 1);
       assert.strictEqual(parsed.done, false);
 
