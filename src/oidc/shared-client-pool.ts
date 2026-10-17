@@ -22,14 +22,8 @@ export class SharedClientPool {
   async acquire(email: string, create: () => Promise<MongoClient>): Promise<UserClientLease> {
     let entry = this.entries.get(email);
     if (!entry) {
-      const created: PoolEntry = { client: create(), refs: 0 };
-      created.client.catch(() => {
-        if (this.entries.get(email) === created) {
-          this.entries.delete(email);
-        }
-      });
-      this.entries.set(email, created);
-      entry = created;
+      entry = { client: create(), refs: 0 };
+      this.entries.set(email, entry);
     }
 
     const acquired = entry;
@@ -39,7 +33,10 @@ export class SharedClientPool {
     try {
       client = await acquired.client;
     } catch (err) {
-      acquired.refs--;
+      // Forget the failed client so the next acquire creates a new one
+      if (this.entries.get(email) === acquired) {
+        this.entries.delete(email);
+      }
       throw err;
     }
 

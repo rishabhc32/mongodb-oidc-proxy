@@ -9,7 +9,7 @@ export const MAX_MESSAGE_SIZE_BYTES = 48000000;
 // larger shared allocation (Node's Buffer pool), so views must never be built
 // from buf.buffer directly or they can expose memory past the message
 function view(buf: Uint8Array, length: number, offset: number, size: number): Uint8Array {
-  if (!Number.isInteger(offset) || !Number.isInteger(size) || offset < 0 || size < 0 || offset + size > length) {
+  if (size < 0 || offset + size > length) {
     throw new RangeError(`Out of bounds read at offset ${offset} with size ${size} (message length ${length})`);
   }
   return buf.subarray(offset, offset + size);

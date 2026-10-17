@@ -53,18 +53,11 @@ export class JWTValidator {
 
       // Verify email exists. It becomes the MongoDB user and role name
       const email = (payload as Record<string, unknown>).email;
-      if (email === undefined || email === null || email === '') {
+      if (typeof email !== 'string' || email === '') {
         return {
           valid: false,
           errorCode: JWTValidationError.INVALID,
-          error: 'Email claim is required in JWT'
-        };
-      }
-      if (typeof email !== 'string') {
-        return {
-          valid: false,
-          errorCode: JWTValidationError.INVALID,
-          error: 'Email claim must be a string'
+          error: 'Email claim must be a non-empty string'
         };
       }
 

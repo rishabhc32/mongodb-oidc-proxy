@@ -1039,7 +1039,7 @@ describe('JWTValidator with real keys', function () {
     const result = await validator.validate(token);
     assert.strictEqual(result.valid, false);
     assert.strictEqual(result.errorCode, JWTValidationError.INVALID);
-    assert.strictEqual(result.error, 'Email claim is required in JWT');
+    assert.strictEqual(result.error, 'Email claim must be a non-empty string');
   });
 
   it('returns INVALID when the email claim is not a string', async () => {
@@ -1049,7 +1049,7 @@ describe('JWTValidator with real keys', function () {
     const result = await validator.validate(token);
     assert.strictEqual(result.valid, false);
     assert.strictEqual(result.errorCode, JWTValidationError.INVALID);
-    assert.strictEqual(result.error, 'Email claim must be a string');
+    assert.strictEqual(result.error, 'Email claim must be a non-empty string');
   });
 
   it('returns INVALID when email_verified is false', async () => {
@@ -2147,7 +2147,7 @@ describe('OIDCProxy with mock validator', function () {
 
     after(async () => {
       const adminDb = adminClient.db('admin');
-      for (const name of ['unmanaged@example.com', 'legacy@example.com', 'migrated@example.com', 'fresh@example.com']) {
+      for (const name of ['unmanaged@example.com', 'legacy@example.com', 'managed@example.com', 'fresh@example.com']) {
         await adminDb.command({ dropUser: name }).catch(() => {});
         await adminDb.command({ dropRole: name }).catch(() => {});
       }
@@ -2199,8 +2199,8 @@ describe('OIDCProxy with mock validator', function () {
       assert.strictEqual((await getUser(user)).customData, undefined);
     });
 
-    it('logs in a user marked as managed by the migration', async () => {
-      const user = 'migrated@example.com';
+    it('logs in an existing user marked as managed', async () => {
+      const user = 'managed@example.com';
       const adminDb = adminClient.db('admin');
       await adminDb.command({ createRole: user, privileges: [], roles: [] });
       await adminDb.command({
@@ -2229,7 +2229,7 @@ describe('OIDCProxy with mock validator', function () {
       const mockValidator = new MockJWTValidator({
         valid: false,
         errorCode: JWTValidationError.INVALID,
-        error: 'Email claim is required in JWT'
+        error: 'Email claim must be a non-empty string'
       });
 
       const config: OIDCProxyConfig = {

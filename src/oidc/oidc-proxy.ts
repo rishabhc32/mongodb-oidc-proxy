@@ -13,7 +13,7 @@ import {
   getCommandBody,
   getDocumentSequences
 } from '@src/parse';
-import { JWTValidator, JWTValidationError } from '@src/oidc/jwt-validator';
+import { JWTValidator, JWTValidationError, type JWTValidationResult } from '@src/oidc/jwt-validator';
 import { MessageBuilder } from '@src/oidc/message-builder';
 import { SharedClientPool, type UserClientLease } from '@src/oidc/shared-client-pool';
 import { randomBytes } from '@src/utils/random';
@@ -472,20 +472,7 @@ export class OIDCConnection extends EventEmitter {
 
       const result = await this.jwtValidator.validate(jwt);
       if (result.valid) {
-        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        const email = result.email!;
-        const lease = await this.provisionUser(msg.header.requestID, email);
-        if (!lease) {
-          return;
-        }
-
-        // Authentication successful
-        this.replaceLease(lease);
-        this.email = email;
-        this.tokenExp = result.exp;
-
-        this.write(this.messageBuilder.buildAuthSuccessResponse(msg.header.requestID, this.conversationId));
-        this.emit('authSuccess', email, result.subject);
+        await this.login(msg.header.requestID, result);
         return;
       }
 
@@ -528,38 +515,32 @@ export class OIDCConnection extends EventEmitter {
       return;
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    const email = result.email!;
-    const lease = await this.provisionUser(msg.header.requestID, email);
-    if (!lease) {
-      return;
-    }
-
-    // Authentication successful
-    this.replaceLease(lease);
-    this.email = email;
-    this.tokenExp = result.exp;
-
-    this.write(this.messageBuilder.buildAuthSuccessResponse(msg.header.requestID, this.conversationId));
-    this.emit('authSuccess', email, result.subject);
+    await this.login(msg.header.requestID, result);
   }
 
-  private async provisionUser(requestId: number, email: string): Promise<UserClientLease | null> {
+  // Logs the connection in as the validated token's user
+  private async login(requestId: number, token: JWTValidationResult): Promise<void> {
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const email = token.email!;
     const result = await this.proxy.provisionUser(email, this.lease, (message) => this.emit('debug', email, message));
     if ('error' in result) {
       this.emit('debug', email, result.error);
       this.write(this.messageBuilder.buildAuthFailureResponse(requestId, result.error));
-      return null;
+      return;
     }
 
     // The client may have disconnected while the user was being provisioned.
     // The socket close handler has already run, so nothing else would release this
     if (this.socket.destroyed) {
       result.lease.release();
-      return null;
+      return;
     }
 
-    return result.lease;
+    this.replaceLease(result.lease);
+    this.email = email;
+    this.tokenExp = token.exp;
+    this.write(this.messageBuilder.buildAuthSuccessResponse(requestId, this.conversationId));
+    this.emit('authSuccess', email, token.subject);
   }
 
   private extractJwtFromPayload(payload?: Uint8Array): string | null {
@@ -635,9 +616,7 @@ export class OIDCConnection extends EventEmitter {
     // Like mongod, cap messages at 16 KB until the connection logs in, compressed or not,
     // so an unauthenticated client can't make the proxy buffer or decompress large messages
     this.parser.maxMessageSize = lease ? MAX_MESSAGE_SIZE_BYTES : PRE_AUTH_MAX_MESSAGE_SIZE_BYTES;
-    if (previous !== lease) {
-      previous?.release();
-    }
+    previous?.release();
   }
 
   private sendReauthRequired(requestID: number, reason: string): void {
