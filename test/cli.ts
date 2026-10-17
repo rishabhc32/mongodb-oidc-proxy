@@ -228,9 +228,9 @@ describe('cli createLogSink', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-test-'));
     try {
       const logFile = path.join(tmpDir, 'proxy.log');
-      const { writeLog, closeLog } = createLogSink(logFile);
+      const { writeEvent, closeLog } = createLogSink(logFile, []);
       for (let i = 0; i < 10000; i++) {
-        writeLog(JSON.stringify({ i }));
+        writeEvent('test', { i });
       }
       await closeLog();
       assert.strictEqual(fs.readFileSync(logFile, 'utf8').trim().split('\n').length, 10000);
