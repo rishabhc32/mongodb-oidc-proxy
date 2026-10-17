@@ -10,6 +10,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default; only the coverage comment job, which runs no project or
+# npm code, may write to pull requests
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test
@@ -20,9 +25,6 @@ jobs:
         node-version: [22.x, 24.x]
     runs-on: ${{matrix.os}}
     timeout-minutes: 15
-    permissions:
-      contents: read
-      pull-requests: write # for the coverage comment
     steps:
       - uses: actions/checkout@v5
       - name: Use Node.js ${{ matrix.node-version }}
@@ -33,17 +35,39 @@ jobs:
         run: npm ci
       - name: Test
         run: npm test
-      # One comment per pull request, updated on each push. Skipped for forks and
-      # Dependabot, whose pull requests get a read-only token
-      - name: Comment coverage on the pull request
-        if: >-
-          matrix.node-version == '24.x' && github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Save coverage table
+        if: matrix.node-version == '24.x' && github.event_name == 'pull_request'
         run: |
           { echo '### Coverage'; echo '```'; npx c8 report --reporter=text; echo '```'; } > coverage.md
-          gh pr comment ${{ github.event.pull_request.number }} --body-file coverage.md --edit-last --create-if-none
+      - uses: actions/upload-artifact@v7
+        if: matrix.node-version == '24.x' && github.event_name == 'pull_request'
+        with:
+          name: coverage
+          path: coverage.md
+          retention-days: 1
+
+  # One comment per pull request, updated on each push. Skipped for forks and
+  # Dependabot, whose pull requests get a read-only token
+  coverage-comment:
+    name: Coverage comment
+    needs: test
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage
+      - name: Comment coverage on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr comment "$PR" --body-file coverage.md --edit-last --create-if-none
 
   docker:
     name: Docker images
