@@ -5,7 +5,14 @@ import { MongoClient, Document } from 'mongodb';
 import { deserialize, Long } from 'bson';
 import { LRUCache } from 'lru-cache';
 import { WireProtocolParser } from '@src/parse-stream';
-import { FullMessage, MAX_MESSAGE_SIZE_BYTES, getSaslCommand, getCommandDb, getCommandBody } from '@src/parse';
+import {
+  FullMessage,
+  MAX_MESSAGE_SIZE_BYTES,
+  getSaslCommand,
+  getCommandDb,
+  getCommandBody,
+  getDocumentSequences
+} from '@src/parse';
 import { JWTValidator, JWTValidationError } from '@src/oidc/jwt-validator';
 import { MessageBuilder } from '@src/oidc/message-builder';
 import { SharedClientPool, type UserClientLease } from '@src/oidc/shared-client-pool';
@@ -24,6 +31,13 @@ const PRE_AUTH_MAX_MESSAGE_SIZE_BYTES = 16384;
 // Stored in customData of MongoDB users the proxy creates, so it never resets
 // the password or roles of a user it does not own
 const MANAGED_USER_MARKER = 'mongodb-oidc-proxy';
+
+// The driver sends a command field holding a DocumentSequence as an OP_MSG document
+// sequence, as it does for its own bulkWrite. The class is internal, so it has no types
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { DocumentSequence } = require('mongodb/lib/cmap/commands') as {
+  DocumentSequence: new (field: string, documents: Document[]) => object;
+};
 
 interface BackendInfo {
   protocol: string;
@@ -667,9 +681,17 @@ export class OIDCConnection extends EventEmitter {
     const command = { ...body };
     delete command.$db;
 
+    // Document sequences are logged as part of the command but sent on as sequences:
+    // merged into the command document, a batch could exceed its 16 MB limit
+    const backendCommand: Document = { ...command };
+    for (const [field, documents] of Object.entries(getDocumentSequences(msg))) {
+      command[field] = documents;
+      backendCommand[field] = new DocumentSequence(field, documents);
+    }
+
     try {
       // Use the user's own backend client
-      const result = await lease.client.db(dbName).command(command as Document);
+      const result = await lease.client.db(dbName).command(backendCommand);
 
       // Ensure cursor.id is a proper BSON Long type for mongosh compatibility
       if (result.cursor && result.cursor.id !== undefined) {

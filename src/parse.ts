@@ -1,6 +1,6 @@
 import zlib from 'zlib';
 import { promisify, TextDecoder } from 'util';
-import { type Binary, deserialize } from 'bson';
+import { type Binary, type Document, deserialize } from 'bson';
 
 // Largest message MongoDB accepts (its advertised maxMessageSizeBytes)
 export const MAX_MESSAGE_SIZE_BYTES = 48000000;
@@ -165,7 +165,7 @@ class OpMsg {
                 break;
               }
             }
-            const docSequenceId = new TextDecoder().decode(view(buf, length, seqIdStart, i - 1 - seqIdStart));
+            const docSequenceId = new TextDecoder().decode(view(buf, length, seqIdStart, i - seqIdStart));
             const objects: BSONBuffer[] = [];
             for (i = i + 1; i < seqIdStart - 4 + sectionSize;) {
               const bsonSize = dv.getUint32(i, true);
@@ -750,4 +750,18 @@ export function getCommandBody(msg: FullMessage): Record<string, unknown> | null
   }
 
   return bodySection.body.data;
+}
+
+// The message's document sequences (OP_MSG kind 1 sections) by field name. Most drivers
+// send the documents of an insert, update or delete this way instead of in the body
+export function getDocumentSequences(msg: FullMessage): Record<string, Document[]> {
+  const sequences: Record<string, Document[]> = {};
+  if (msg.contents.opCode === 'OP_MSG') {
+    for (const section of msg.contents.sections) {
+      if (section.kind === 'DocumentSequence') {
+        sequences[section.docSequenceId] = section.objects.map((object) => object.data);
+      }
+    }
+  }
+  return sequences;
 }

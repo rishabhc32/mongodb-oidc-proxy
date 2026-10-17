@@ -2,7 +2,7 @@ import assert from 'assert';
 import zlib from 'zlib';
 import { once } from 'events';
 import { serialize } from 'bson';
-import { ParseMessage, OpCode, MAX_MESSAGE_SIZE_BYTES } from '@src/parse';
+import { ParseMessage, OpCode, MAX_MESSAGE_SIZE_BYTES, getDocumentSequences } from '@src/parse';
 import { WireProtocolParser } from '@src/parse-stream';
 
 function header(messageLength: number, opCode: number): Buffer {
@@ -75,6 +75,18 @@ describe('ParseMessage', () => {
     message.writeUInt32LE(message.length, 21);
     const backing = Buffer.concat([message, Buffer.alloc(64, 1)]);
     await assert.rejects(ParseMessage(backing.subarray(0, message.length)), /Out of bounds/);
+  });
+
+  it('reads the field name and documents of a document sequence', async () => {
+    const field = Buffer.from('documents\0');
+    const docs = Buffer.concat([serialize({ a: 1 }), serialize({ a: 2 })]);
+    const section = Buffer.alloc(5);
+    section.writeUInt8(1, 0);
+    section.writeUInt32LE(4 + field.length + docs.length, 1);
+    const body = Buffer.concat([opMsgBody({ insert: 'c', $db: 'test' }), section, field, docs]);
+    const result = await ParseMessage(Buffer.concat([header(16 + body.length, OpCode.OP_MSG), body]));
+    assert('msg' in result);
+    assert.deepStrictEqual(getDocumentSequences(result.msg), { documents: [{ a: 1 }, { a: 2 }] });
   });
 
   it('rejects an empty document in a document sequence', async () => {

@@ -27,24 +27,28 @@ class MockJWTValidator extends JWTValidator {
   }
 }
 
-// Helper to build OP_MSG from a BSON document
-function buildOpMsg(doc: Record<string, unknown>, requestId = 1): Buffer {
-  const bsonDoc = Buffer.from(serialize(doc));
-  const flagBits = Buffer.alloc(4);
-  flagBits.writeUInt32LE(0, 0);
-  const sectionKind = Buffer.alloc(1);
-  sectionKind.writeUInt8(0, 0);
-
-  const bodyLength = 4 + 1 + bsonDoc.length;
-  const messageLength = 16 + bodyLength;
+// Helper to build OP_MSG from a BSON document, plus a document sequence per entry of `sequences`
+function buildOpMsg(
+  doc: Record<string, unknown>,
+  requestId = 1,
+  sequences: Record<string, Record<string, unknown>[]> = {}
+): Buffer {
+  const sections = [Buffer.from([0]), Buffer.from(serialize(doc))];
+  for (const [field, docs] of Object.entries(sequences)) {
+    const payload = Buffer.concat([Buffer.from(`${field}\0`), ...docs.map((d) => Buffer.from(serialize(d)))]);
+    const size = Buffer.alloc(4);
+    size.writeInt32LE(4 + payload.length);
+    sections.push(Buffer.from([1]), size, payload);
+  }
+  const body = Buffer.concat([Buffer.alloc(4), ...sections]); // flagBits, then sections
 
   const header = Buffer.alloc(16);
-  header.writeInt32LE(messageLength, 0);
+  header.writeInt32LE(16 + body.length, 0);
   header.writeInt32LE(requestId, 4);
   header.writeInt32LE(0, 8);
   header.writeInt32LE(2013, 12); // OP_MSG
 
-  return Buffer.concat([header, flagBits, sectionKind, bsonDoc]);
+  return Buffer.concat([header, body]);
 }
 
 // Helper class to read multiple responses from a socket
@@ -1503,8 +1507,12 @@ describe('OIDCProxy with mock validator', function () {
       const addr = proxy.address() as net.AddressInfo;
       await new Promise<void>((resolve) => client.connect(addr.port, 'localhost', resolve));
       const [conn] = await newConnection;
-      const request = async (doc: Record<string, unknown>, requestId: number) => {
-        client.write(buildOpMsg(doc, requestId));
+      const request = async (
+        doc: Record<string, unknown>,
+        requestId: number,
+        sequences?: Record<string, Record<string, unknown>[]>
+      ) => {
+        client.write(buildOpMsg(doc, requestId, sequences));
         return deserialize((await reader.read()).subarray(21));
       };
       const login = (requestId: number) =>
@@ -1698,6 +1706,46 @@ describe('OIDCProxy with mock validator', function () {
         a.client.destroy();
         b.client.destroy();
         await proxy.stop();
+      }
+    });
+
+    it('forwards document sequences, which most drivers use for inserts', async () => {
+      const user = 'writer@example.com';
+      const admin = new MongoClient(`mongodb://${hostport}`);
+      await admin.connect();
+      const collection = admin.db('test').collection('sequences');
+      await admin.db('admin').command({
+        createRole: user,
+        privileges: [{ resource: { db: 'test', collection: 'sequences' }, actions: ['insert'] }],
+        roles: []
+      });
+      const proxy = new OIDCProxy(config(), validFor(user));
+      await proxy.start();
+      const { client, conn, request, login } = await connect(proxy);
+
+      try {
+        assert.strictEqual((await login(1)).ok, 1);
+        const forwarded = once(conn, 'commandForwarded');
+        // 17 MB in total, more than one command document may hold
+        const documents = Array.from({ length: 17 }, (_, i) => ({ _id: i, data: 'x'.repeat(1024 * 1024) }));
+        const response = await request({ insert: 'sequences', $db: 'test' }, 2, { documents });
+        assert.strictEqual(response.ok, 1);
+        assert.strictEqual(response.n, 17);
+        assert.strictEqual(await collection.countDocuments(), 17);
+
+        // Logged with its documents
+        const [, , , logged] = await forwarded;
+        assert.strictEqual(logged.documents.length, 17);
+      } finally {
+        client.destroy();
+        await proxy.stop();
+        await collection.drop().catch(() => {});
+        await admin
+          .db('admin')
+          .command({ dropUser: user })
+          .catch(() => {});
+        await admin.db('admin').command({ dropRole: user });
+        await admin.close();
       }
     });
 
